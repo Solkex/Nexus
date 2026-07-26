@@ -94,4 +94,47 @@ When none of your target Echoes are available, Nexus may take the least harmful 
 
 This is intentional. The filler holds the slot until a wanted Echo appears and replaces it later. A strange-looking choice does not always mean the recommendation is wrong; Nexus may be planning around future replacements or protecting a harder-to-find Echo.
 
-The HUD's **STILL NEEDED** section shows what is missing and will replace filler on following runs…204530 tokens truncated…K_ROWS), #list))
+The HUD's **STILL NEEDED** section shows what is missing and will replace filler on following runs. Hover over relevant information for more detail.
+
+## Unlearned Tomes
+
+If the HUD shows **UNLEARNED**, one or more Echoes in the selected wishlist cannot appear yet because the related tome has not been learned.
+
+Obtain the tome through world content and the Echo will become eligible to roll.
+
+## Commands
+
+Primary command: `/nexus`
+
+Aliases: `/nx` and `/wr`
+
+- `/nexus` — Show all commands
+- `/nexus builds` — Open Community Builds
+- `/nexus leaderboard` — Open the DPS Leaderboard
+- `/nexus editor` — Open the Wishlist Editor
+- `/nexus sync` — Request current builds and records from nearby Nexus users
+- `/nexus dps` — Show DPS capture status
+- `/nexus auto` — Toggle Auto mode
+- `/nexus panel` — Show or hide the main HUD
+- `/nexus overlay` — Show or hide the on-screen wishlist
+- `/nexus status` — Show diagnostic status
+
+## Requirements
+
+- Details! is required for DPS tracking and leaderboard records.
+- [Details! 3.3.5 download](https://warperia.com/addon-wotlk/details-damagemeter/)
+
+## Important Notes
+
+- Leaderboard records use the exact Echo IDs and stack quantities from the recorded pull.
+- Different Echo quantities count as different loadouts.
+- Verified leaderboard sessions must last at least 30 seconds.
+- Only the character that owns a build can edit it.
+- A loadout tied to a leaderboard record cannot have its Echo list changed afterward.
+- The owner can still rename the record build and update its description.
+- Nexus safely throttles login syncing and only downloads large exact loadouts when they are missing.
+- Saved WishlistRealizer data is migrated automatically on first load.
+
+## Source Code
+
+The public Nexus 1.0 source is available in this repository. Players should install the prepared [Nexus.zip release](https://github.com/Solkex/Nexus/releases/latest/download/Nexus.zip), not the repository ZIP.

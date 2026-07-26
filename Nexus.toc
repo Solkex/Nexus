@@ -1,0 +1,29 @@
+## Interface: 30300
+## Title: Nexus
+## Notes: Nexus — Echo build automation, community builds, DPS leaderboards, and auto-snapshot convergence.
+## Author: Boganic
+## Version: 1.0
+## OptionalDeps: ProjectEbonhold
+## SavedVariables: NexusDB WishlistRealizerDB
+
+data\DefaultProfile.lua
+logic\Model.lua
+logic\Strategy.lua
+logic\Ratchet.lua
+logic\Policy.lua
+core\Store.lua
+core\Codec.lua
+core\Sync.lua
+core\DpsCapture.lua
+core\GameAdapter.lua
+ui\Readout.lua
+ui\Panel.lua
+ui\JournalTab.lua
+ui\LogViewer.lua
+ui\WishlistEditor.lua
+ui\WishlistOverlay.lua
+ui\QuickStart.lua
+ui\CommunityBuilds.lua
+ui\Leaderboard.lua
+ui\Nameplate.lua
+core\Main.lua

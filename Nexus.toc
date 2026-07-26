@@ -27,3 +27,4 @@ ui\CommunityBuilds.lua
 ui\Leaderboard.lua
 ui\Nameplate.lua
 core\Main.lua
+core\Version.lua

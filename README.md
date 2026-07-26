@@ -4,7 +4,7 @@ Echo build automation, community builds, DPS leaderboards, and mesh-style synchr
 
 ## Download Nexus 1.1
 
-### [Download the player-ready Nexus.zip](https://github.com/Solkex/Nexus/releases/latest/download/Nexus.zip)
+### [Download the player-ready Nexus.zip](https://github.com/Solkex/Nexus/releases/download/1.1/Nexus1.1.zip)
 
 This is the correct download for normal players.
 
@@ -12,7 +12,7 @@ This is the correct download for normal players.
 
 ## Installation
 
-1. Download [Nexus.zip](https://github.com/Solkex/Nexus/releases/latest/download/Nexus.zip).
+1. Download [Nexus.zip](https://github.com/Solkex/Nexus/releases/download/1.1/Nexus1.1.zip).
 2. Open the archive and extract the `Nexus` folder.
 3. Place that folder inside Ebonhold's `Interface\AddOns` folder.
 4. Confirm this file exists:
@@ -123,6 +123,7 @@ Interface\AddOns\Nexus-main\Nexus\Nexus.toc
 ### Community Builds are not updating
 
 - Make sure other Nexus users are online.
+- You may have to be in normal world tier it bugs sometimes idk
 - Press **Sync now** once and allow the sync window to finish.
 - Avoid repeatedly pressing Sync; Nexus deliberately rate-limits traffic.
 - Use `/nexus status` for diagnostic information.

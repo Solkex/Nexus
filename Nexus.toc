@@ -1,8 +1,8 @@
 ## Interface: 30300
 ## Title: Nexus
-## Notes: Nexus — Echo build automation, community builds, DPS leaderboards, and auto-snapshot convergence.
+## Notes: Nexus — Echo build automation, community builds, DPS leaderboards, and mesh-style synchronization.
 ## Author: Boganic
-## Version: 1.0
+## Version: 1.1
 ## OptionalDeps: ProjectEbonhold
 ## SavedVariables: NexusDB WishlistRealizerDB
 

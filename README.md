@@ -4,7 +4,7 @@ Echo build automation, community builds, DPS leaderboards, and mesh-style synchr
 
 ## Download Nexus 1.1
 
-### [Download the player-ready Nexus.zip](https://github.com/Solkex/Nexus/releases/download/1.1/Nexus1.1.zip)
+### [Download Nexus.zip](https://github.com/Solkex/Nexus/releases)
 
 This is the correct download for normal players.
 
@@ -12,7 +12,8 @@ This is the correct download for normal players.
 
 ## Installation
 
-1. Download [Nexus.zip](https://github.com/Solkex/Nexus/releases/download/1.1/Nexus1.1.zip).
+1. Download Nexus.zip latest release here
+https://github.com/Solkex/Nexus/releases
 2. Open the archive and extract the `Nexus` folder.
 3. Place that folder inside Ebonhold's `Interface\AddOns` folder.
 4. Confirm this file exists:

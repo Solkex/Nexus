@@ -116,8 +116,10 @@ Fork from EchoOptimizer/logic/Model.lua VERBATIM: `NormName`, `StripRaritySuffix
   `flags.DISABLE_SUPPRESSES_GUARANTEE` — skipping members of disabled levers.
   Prediction is planning/UI-only; never coverage.
 - `Ratchet.Dominates(candidateOwned, incumbentEchoes, plan, catalog)` → `ok, detail` —
-  candidate's wished-family coverage ⊇ incumbent's AND candidate's off-wishlist family
-  set ⊆ incumbent's AND ≥1 strict improvement. `incumbentEchoes` = slot echoes array.
+  compare target-capped wishlist stacks and distinct off-wishlist filler families.
+  Save a net wishlist gain, a filler reduction at equal wishlist progress, or a
+  one-for-one wishlist rotation that adds no filler. Reject unchanged snapshots
+  and net wishlist regressions. `incumbentEchoes` = slot echoes array.
 - `Ratchet.ScoreSlot(slotEchoes, plan, catalog)` → number (wished families covered −
   `0.25 ×` off-wishlist families) and `Ratchet.BestSlot(slots, plan, catalog)` →
   `slot|nil` over genuinely-verified rows only (`verified and verifiedFieldPresent and
@@ -129,32 +131,55 @@ Fork from EchoOptimizer/logic/Model.lua VERBATIM: `NormName`, `StripRaritySuffix
 ## logic/Policy.lua — `Nexus.Policy`
 
 - `Policy.Decide(state)` where `state = { board, owned, charges, plan, queue, flags,
-  level, horizon, support, params }` → action:
-  `{ type = "take"|"reroll"|"banish"|"wait", spellId=?, index=?, reason = s }`
+  level, horizon, support, params, searchRefused, allowBanish }`
+  → action:
+  `{ type = "take"|"freeze"|"reroll"|"banish"|"wait", spellId=?, index=?,
+  reason = s, endgame=? }`
   plus `annotations = { [cardIndex] = "wanted"|"guaranteed"|"duplicate"|"filler"|"junk" }`.
-  Rules (§5.5 greedy + addendum):
-  1. Compute `Model.Delta` for each card. Guaranteed card = `board.guaranteedIndex`
-     (may be nil — then branch 2 skipped).
-  2. Tight-regime check: `wantedInQueue >= horizon` → take guaranteed when present &
-     wanted; never divert.
-  3. Take best free card if its Δ > guaranteed's Δ and Δ > 0.
-  4. Else take guaranteed when present.
-  5. Else (junk board): banish proposal — only when `charges.banish > 0`, target the
-     worst NON-guaranteed/frozen/carried/justFrozen card whose removal raises
-     `EmaxK(FreeDist without it, 1)`-style expectation, `type="banish"` (Main fires at
-     most one per fresh run-data push; Policy needn't know) — else reroll proposal when
-     `charges.reroll > 0` AND (no guaranteed present, or guaranteed Δ low
-     (< params.rerollHoldThreshold), or `flags.REROLL_HOLDS_GUARANTEED == true`) AND
-     `EmaxGivenK(dist, bestCurrentΔ, 2) - params.rerollCost > bestCurrentΔ` — else take
-     the least-harmful card (max Δ, break ties toward non-filler, lowest quality).
-  6. Freeze is scoped to ONE case (step 2b): a scarce wished family
-     (guarantee already exhausted, still short of stack target) sharing a
-     board with no other card worth taking outright, and only with a
-     banish/reroll charge in hand to spend on the rest of the board.
-     Everything else in the decision tree still NEVER returns type
-     "freeze". NEVER banish/reroll-target index of a guaranteed/frozen/
-     carried/justFrozen card.
-  7. `board == nil` or `owned.synced == false` (with level>1) → `{type="wait", reason}`.
+  Rules:
+  1. Compute `Model.Delta` for each card. Guaranteed card =
+     `board.guaranteedIndex` or a card's `isGuaranteed` flag; array position has
+     no meaning.
+  2. Below level 80, protect an exposed wanted side Echo first, then spend one
+     safe off-wishlist Banish per fresh run-data push before normal queue
+     handling. A frozen/carried wanted side permits early Banish while the
+     guarantee remains; without a guarantee, wanted cards keep take priority.
+  3. While a guaranteed card exists, freeze the best scarce wanted side Echo,
+     re-evaluate after asynchronous resolution, then drain guaranteed cards.
+     A queue-deliverable single-stack target is annotated `returns later` and
+     is not frozen. An unavailable or refused Freeze takes the wanted side Echo
+     as loss prevention. At level 80, Freeze additionally requires a numeric
+     horizon above one. This drain rule applies only to wishlist guarantees.
+     An off-wishlist guarantee is never selected: take a visible missing
+     wishlist side not already promised by the remaining queue, otherwise use
+     safe side Banishes then Rerolls, and finally take the least-harmful side if
+     search is exhausted.
+  4. When no guaranteed card exists, take a frozen/carried wanted Echo first,
+     then any visible wanted Echo. With nothing wanted, use one safe Banish per
+     fresh run-data push, then Reroll, then make the deterministic least-harmful
+     mandatory selection.
+  5. Final-selection exception requires both level 80 and a numeric
+     `horizon == 1`. Lower-level `horizon == 1` only ends the current pending
+     batch and must keep normal queue behavior. Level 80 alone is not a final
+     signal. On the true final selection, a visible wanted side Echo is taken
+     immediately. Otherwise, when a frozen wanted Echo or guaranteed card
+     protects the final choice and another wishlist target remains missing,
+     use a safe off-wishlist Banish before consuming that fallback. Reroll may
+     continue from a frozen wanted fallback, a non-wanted guaranteed fallback,
+     or a wanted guaranteed fallback only when
+     `REROLL_HOLDS_GUARANTEED == true`. Exhausted search takes the frozen Echo
+     when present; otherwise normal guaranteed draining resumes.
+  6. Final comparison is fully wishlist-driven: stacking deficit,
+     quality-qualified one-shot, normal delta, then stable card index. No Echo
+     name receives a special final-selection priority.
+  7. Never Banish a wished-family, guaranteed, frozen, carried, or just-frozen
+     card. A Reroll reason may describe the guaranteed card as held only when
+     `flags.REROLL_HOLDS_GUARANTEED == true`.
+  8. `searchRefused` records synchronous final-search refusals for the current
+     board signature; Policy skips refused actions and consumes the protected
+     frozen/guaranteed fallback.
+  9. `board == nil` or `owned.synced == false` (with level>1) →
+     `{type="wait", reason}`.
   Pure function; same input → same output.
 
 ## data/DefaultProfile.lua — `Nexus.DefaultProfile`
@@ -210,9 +235,10 @@ run-boundary, self-check demotion hook).
   in-flight select resolution compares idSignatures like-for-like (the flag-suffixed
   `signature` would misread a failed select as success).
 - **`Ratchet.Dominates` filler axis is COUNT-based**, not set-subset: every board
-  forces a take, so per-run filler sets always differ and subset never holds; the
-  spec's own potential Φ = coverage − ρ·fillerCount is count-based. Coverage stays
-  set-superset. Advisor mode (no wishlist) NEVER saves.
+  forces a take, so per-run filler sets always differ. Wishlist progress is the
+  sum of target-capped stacks. A clean equal-progress wishlist rotation saves so
+  the next run can search for the family rotated out; rotations that add filler
+  do not save. Advisor mode (no wishlist) NEVER saves.
 - `Store` per-char `tomeTogglePending[lever] = { t = sentAt, want = bool }` (legacy
   bare-number entries read as `want=true`); `priorAutoAccept` survives version bumps.
 - `GameAdapter.DisabledLevers()` values are `"confirmed"` (server mirror) or
@@ -224,8 +250,13 @@ run-boundary, self-check demotion hook).
 - Run boundary (`A.RunBoundaryReset`, called on every arrival at level 1): recorded
   picks void; owned-sync trust suspended until the client-reported owned set CHANGES
   from its at-reset snapshot (dead-run ghost protection).
-- Level 80 with a live board runs the board FIRST; save only after the final board
-  is spent. After any save, the slot cache is re-requested (~3.5s) for verification.
+- Level 80 with a live board runs every pending board FIRST; save only after
+  `Adapter.Board()` clears. `Adapter.Horizon()`, not level, identifies the final
+  remaining selection. After any save, the slot cache is re-requested (~3.5s)
+  for verification.
+- Decision-log board records include `horizon`; final-selection proposals set
+  `proposal.endgame=true` and carry a reason naming the selected Banish, Reroll,
+  higher-priority side Echo, or frozen fallback path.
 - Seeding saves only into an empty slot within `GetServerUnlockedSlots()`.
 - `Panel.Toggle()` exists. `/wr undemote` clears flag demotions.
 

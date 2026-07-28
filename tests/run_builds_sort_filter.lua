@@ -2,7 +2,7 @@
 local H = dofile("tests/harness.lua")
 dofile("core/Codec.lua"); dofile("core/Sync.lua")
 dofile("data/DefaultProfile.lua"); dofile("logic/Model.lua"); dofile("logic/Strategy.lua")
-dofile("logic/Ratchet.lua"); dofile("logic/Policy.lua"); dofile("core/Store.lua")
+dofile("logic/Ratchet.lua"); dofile("logic/Relay.lua"); dofile("logic/Policy.lua"); dofile("core/Store.lua")
 dofile("core/GameAdapter.lua")
 dofile("ui/Readout.lua"); dofile("ui/Panel.lua")
 local provider

@@ -28,6 +28,9 @@ local function FreshState()
         priorAutoAccept = nil,  -- autoAcceptLoadoutEchoes before we touched it
         flagDemotions = {},     -- [flagName] = reason (runtime self-check)
         recordedPicks = {},     -- [spellId] = count (session; adapter-managed)
+        loadoutWishlists = {},  -- [numbered loadout slot] = stable designed-wishlist identity
+        relayPairs = {},        -- [wishlistKey] = { slotA=n, slotB=n }
+        relayPending = nil,     -- confirmed inactive save to arm next level-1 visit
     }
 end
 
@@ -76,6 +79,15 @@ function Store.Init()
                 if old.priorAutoAccept ~= nil then
                     fresh.priorAutoAccept = old.priorAutoAccept
                 end
+                if type(old.loadoutWishlists) == "table" then
+                    fresh.loadoutWishlists = old.loadoutWishlists
+                end
+                if type(old.relayPairs) == "table" then
+                    fresh.relayPairs = old.relayPairs
+                end
+                if type(old.relayPending) == "table" then
+                    fresh.relayPending = old.relayPending
+                end
             end
             db.chars[name] = fresh
         end
@@ -92,6 +104,15 @@ function Store.Init()
         end
         if type(state.recordedPicks) ~= "table" then
             state.recordedPicks = {}
+        end
+        if type(state.loadoutWishlists) ~= "table" then
+            state.loadoutWishlists = {}
+        end
+        if type(state.relayPairs) ~= "table" then
+            state.relayPairs = {}
+        end
+        if state.relayPending ~= nil and type(state.relayPending) ~= "table" then
+            state.relayPending = nil
         end
     end
 end

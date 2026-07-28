@@ -158,7 +158,7 @@ function Model.Delta(plan, owned, spellId, catalog, params)
             -- wants a single copy (live 2026-07-24: a gray guaranteed
             -- Iron Constitution scored full coverage because the old gate
             -- required maxStack == 1).
-            local wishedQuality = Model.EffectiveWishedQuality(plan, catalog, family)
+            local wishedQuality = Model.EffectiveWishedQuality(plan, catalog, family, 0, bySpell)
             if quality < wishedQuality
                 and Model.FamilyMultiQuality(catalog, family) then
                 return Param(params, "qualityMiss")
@@ -171,9 +171,7 @@ function Model.Delta(plan, owned, spellId, catalog, params)
                 and tonumber(target.targetStacks) or nil
             targetStacks = targetStacks or 1
             if ownedFam < targetStacks then
-                -- Same gate on stack top-ups: a wished 5x blue stat must
-                -- never be topped up with gray copies.
-                local wishedQuality = Model.EffectiveWishedQuality(plan, catalog, family)
+                local wishedQuality = Model.EffectiveWishedQuality(plan, catalog, family, ownedFam, bySpell)
                 local quality = tonumber(row.quality) or 0
                 if quality < wishedQuality
                     and Model.FamilyMultiQuality(catalog, family) then
@@ -255,11 +253,25 @@ end
 -- "we want the blue of each stat if possible" means the target is what's
 -- POSSIBLE, not what a lossy wire happened to store. The stored
 -- wishedQuality still acts as a floor for single-variant data.
-function Model.EffectiveWishedQuality(plan, catalog, family)
+function Model.EffectiveWishedQuality(plan, catalog, family, ownedFamCount, ownedBySpell)
     local stored = 0
     local targets = type(plan) == "table" and plan.targets or nil
     local t = targets and targets[family]
     if type(t) == "table" then stored = tonumber(t.wishedQuality) or 0 end
+
+    -- Multi-tier wishlist (e.g. Quick Hands Common×5, Uncommon×50, Rare×20):
+    -- the player explicitly wants copies at EVERY listed quality tier.
+    -- Return the lowest quality on the wishlist so the gate accepts anything
+    -- at or above that level — a Common Quick Hands is not a quality miss
+    -- when Common is explicitly on the wishlist.
+    if type(t) == "table" and type(t.qualityTiers) == "table"
+        and #t.qualityTiers > 1 then
+        return stored  -- stored = wishedQuality = lowest tier quality
+    end
+
+    -- Single-tier wishlist: escalate to catalog peak for multi-quality
+    -- families so the model always chases the best available copy.
+    -- (e.g. wishlist has Rare Iron Constitution → reject Common copies)
     if Model.FamilyMultiQuality(catalog, family) then
         local peak = Model.FamilyPeakQuality(catalog, family)
         if peak > stored then return peak end

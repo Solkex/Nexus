@@ -111,45 +111,92 @@ function M.Dominates(candidateOwned, incumbentEchoes, plan, catalog)
     if type(incumbentEchoes) ~= "table" then
         return false, "incumbent echoes unreadable"
     end
+
     local wished = (type(plan) == "table" and plan.wishedFamilies) or {}
-    local incCov, incFill = EchoFamilySets(incumbentEchoes, wished, catalog)
-    local candCov, candFill = {}, {}
-    for fam, n in pairs(candidateOwned.byFamily) do
-        if Pos(n) then
-            if wished[fam] then candCov[fam] = true else candFill[fam] = true end
+    local targets = (type(plan) == "table" and plan.targets) or {}
+
+    -- Count the saved loadout exactly as the server serialized it. Duplicate
+    -- entries and entries carrying a stacks/count field all contribute.
+    local incStacksByFam = {}
+    local incFill, candFill = {}, {}
+    for _, e in ipairs(incumbentEchoes) do
+        local fam = FamOf(e, catalog)
+        if fam then
+            local n = tonumber(e.stacks or e.count) or 1
+            if wished[fam] then
+                incStacksByFam[fam] = (incStacksByFam[fam] or 0) + n
+            elseif Pos(n) then
+                incFill[fam] = true
+            end
         end
     end
+    for fam, n in pairs(candidateOwned.byFamily) do
+        if Pos(n) and not wished[fam] then candFill[fam] = true end
+    end
 
-    local lost = {}
-    for fam in pairs(incCov) do
-        if not candCov[fam] then lost[fam] = true end
+    -- The save gate is intentionally aggregate. A progressing loadout is a
+    -- workbench toward the whole wishlist, not a promise that every individual
+    -- wished family can only move upward on every run. This allows a run that
+    -- trades one less-useful/overrepresented Echo for a missing wished Echo to
+    -- become the new active snapshot.
+    --
+    -- Each family's contribution is capped at its requested target, so excess
+    -- copies cannot hide a regression elsewhere or inflate progress forever.
+    local incumbentProgress, candidateProgress = 0, 0
+    local gainedStacks, lostStacks = 0, 0
+    for fam in pairs(wished) do
+        local target = targets[fam]
+        local cap = (type(target) == "table" and tonumber(target.targetStacks)) or 1
+        if cap < 1 then cap = 1 end
+        local before = math.min(tonumber(incStacksByFam[fam]) or 0, cap)
+        local after = math.min(tonumber(candidateOwned.byFamily[fam]) or 0, cap)
+        incumbentProgress = incumbentProgress + before
+        candidateProgress = candidateProgress + after
+        local d = after - before
+        if d > 0 then gainedStacks = gainedStacks + d
+        elseif d < 0 then lostStacks = lostStacks + (-d) end
     end
-    if next(lost) then
-        return false, "coverage lost: "
-            .. table.concat(SortedNames(lost, catalog), ", ")
-    end
-    -- Coverage is a hard set-veto (checked above): a wished family is never
-    -- lost. Filler cannot use set-subset -- every board forces a take, so
-    -- each run draws a DIFFERENT junk set and subset never holds. Instead
-    -- save iff the spec's potential Phi = coverage - RHO*fillerCount
-    -- STRICTLY rises: one covered wishlist echo is worth up to 1/RHO new
-    -- filler families. Coverage is bounded, so at full coverage only
-    -- filler-reducing saves pass -> convergence to A = W (spec section 5.7).
-    local RHO = 0.25
+
+    local progressGain = candidateProgress - incumbentProgress
     local candFillN, incFillN = 0, 0
     for _ in pairs(candFill) do candFillN = candFillN + 1 end
     for _ in pairs(incFill) do incFillN = incFillN + 1 end
-    local covGain = 0
-    for fam in pairs(candCov) do
-        if not incCov[fam] then covGain = covGain + 1 end
+    local fillerDelta = candFillN - incFillN
+
+    -- Any net movement toward the requested wishlist saves, regardless of
+    -- which exact wished family supplied that progress or how much filler was
+    -- carried during the run.
+    if progressGain > 0 then
+        return true, string.format(
+            "wishlist progress +%d (gained %d, shed %d wished stacks, filler %+d)",
+            progressGain, gainedStacks, lostStacks, fillerDelta)
     end
-    local fillerDelta = candFillN - incFillN          -- >0 = more filler
-    local dPhi = covGain - RHO * fillerDelta
-    if dPhi <= 0 then
-        return false, string.format("no net gain (coverage +%d, filler %+d)",
-            covGain, fillerDelta)
+
+    -- A clean one-for-one wishlist rotation is also progress: the active
+    -- snapshot learns the newly acquired family, and the next run can search
+    -- for the family that rotated out. This is generic wishlist movement, not
+    -- a name-specific priority. Never accept the rotation if it adds filler.
+    if progressGain == 0 and gainedStacks > 0 and lostStacks > 0
+        and fillerDelta <= 0 then
+        return true, string.format(
+            "wishlist rotation (gained %d, shed %d wished stacks, filler %+d)",
+            gainedStacks, lostStacks, fillerDelta)
     end
-    return true, string.format("coverage +%d, filler %+d", covGain, fillerDelta)
+
+    -- At equal wishlist progress, a strictly cleaner snapshot is still useful.
+    if progressGain == 0 and fillerDelta < 0 then
+        return true, string.format(
+            "wishlist progress unchanged; filler -%d", -fillerDelta)
+    end
+
+    if progressGain < 0 then
+        return false, string.format(
+            "wishlist progress regressed %d (gained %d, shed %d wished stacks)",
+            -progressGain, gainedStacks, lostStacks)
+    end
+
+    return false, string.format(
+        "no net gain (wishlist +0, filler %+d)", fillerDelta)
 end
 
 ------------------------------------------------------------------------
@@ -157,12 +204,38 @@ end
 ------------------------------------------------------------------------
 
 function M.ScoreSlot(slotEchoes, plan, catalog)
-    local wished = (type(plan) == "table" and plan.wishedFamilies) or {}
+    local wished  = (type(plan) == "table" and plan.wishedFamilies) or {}
+    local targets = (type(plan) == "table" and plan.targets) or {}
     local cov, fill = EchoFamilySets(slotEchoes, wished, catalog)
     local nc, nf = 0, 0
     for _ in pairs(cov) do nc = nc + 1 end
     for _ in pairs(fill) do nf = nf + 1 end
-    return nc - 0.25 * nf
+
+    -- Stack bonus: for each wished stacking family, add fractional credit
+    -- proportional to stacks present vs the target.  This ensures BestSlot
+    -- prefers a slot with 14×Rend over one with 1×Rend when the wishlist
+    -- calls for 67×Rend.  Weight < 1 so a stack bonus never outweighs a
+    -- genuinely new echo family.
+    local stackBonus = 0
+    if type(slotEchoes) == "table" then
+        local stacksByFam = {}
+        for _, e in ipairs(slotEchoes) do
+            local fam = FamOf(e, catalog)
+            if fam and wished[fam] then
+                stacksByFam[fam] = (stacksByFam[fam] or 0)
+                    + (tonumber(e.stacks or e.count) or 1)
+            end
+        end
+        for fam, count in pairs(stacksByFam) do
+            local t = targets[fam]
+            local target = (type(t) == "table" and tonumber(t.targetStacks)) or 1
+            if target > 1 then
+                stackBonus = stackBonus + 0.9 * math.min(count, target) / target
+            end
+        end
+    end
+
+    return nc + stackBonus - 0.25 * nf
 end
 
 -- bySlot is SPARSE (designed builds live above maxSlots): pairs only,

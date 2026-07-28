@@ -1,4 +1,4 @@
--- Nexus: ui/Panel.lua v2.12
+-- Nexus: ui/Panel.lua v2.13
 -- Adaptive main HUD. The panel changes shape for setup, active progress,
 -- completed builds, and live Echo rolls instead of showing every section
 -- at all times.
@@ -20,10 +20,20 @@ local performanceLabel, setLabelText
 local dummyLabel, dummyValue, dummyGlobal, dummyGlobalValue, dummyHit
 local lkLabel, lkPersonalLabel, lkValue, lkGlobal, lkGlobalValue, lkHit
 local completeBadge, completeSubtext
-local setupText, setupHint, setupGetStartedBtn
-local autoBtn, buildsBtn, leaderboardBtn, versionText
+local setupText, setupHint, setupGetStartedBtn, setupImportBtn
+local autoBtn, buildsBtn, leaderboardBtn, menuBtn, versionText, worldStatusBox, worldStatusText, worldStatusAsh, worldStatusGain, worldStatusHit, bestDpsText, bestDpsHit
+local showPerformance = false
 
 local function SafeText(v) return v ~= nil and tostring(v) or "" end
+
+local function FrameLevelOf(widget)
+    local getter = widget and widget.GetFrameLevel
+    if type(getter) == "function" then
+        local ok, value = pcall(getter, widget)
+        if ok and tonumber(value) then return tonumber(value) end
+    end
+    return 0
+end
 
 local function ShortName(v, maxChars)
     local s = SafeText(v)
@@ -85,211 +95,159 @@ local function AddDpsTooltip(widget, title, personal, global)
     widget:SetScript("OnLeave", function() GameTooltip:Hide() end)
 end
 
+local function CloseOtherNexusWindows(exceptName)
+    local names = {
+        "NexusCommunityBuildsFrame", "NexusLeaderboardFrame", "NexusEditorFrame",
+        "NexusLogViewer", "NexusQuickStart", "NexusChangelogPopup",
+        "ProjectEbonholdEchoJournal",
+    }
+    for i = 1, #names do
+        local f = _G[names[i]]
+        if names[i] ~= exceptName and f and f.Hide then pcall(f.Hide, f) end
+    end
+    if _G.DropDownList1 and _G.DropDownList1.Hide then pcall(_G.DropDownList1.Hide, _G.DropDownList1) end
+    if _G.DropDownList2 and _G.DropDownList2.Hide then pcall(_G.DropDownList2.Hide, _G.DropDownList2) end
+end
+
+function M.CloseOtherWindows(exceptName)
+    CloseOtherNexusWindows(exceptName)
+end
+
 local function EnsureFrame()
     if frame then return frame end
 
     frame = CreateFrame("Frame", "NexusPanel", UIParent)
-    frame:SetSize(340, 240)
-    frame:SetPoint("RIGHT", UIParent, "RIGHT", -40, 0)
+    frame:SetSize(300, 210)
+    frame:SetClampedToScreen(true)
+    NexusDB = NexusDB or {}
+    if tonumber(NexusDB.panelX) and tonumber(NexusDB.panelY) then
+        frame:SetPoint("CENTER", UIParent, "CENTER", NexusDB.panelX, NexusDB.panelY)
+    else
+        frame:SetPoint("RIGHT", UIParent, "RIGHT", -40, 0)
+    end
     frame:SetMovable(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
-    frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+    frame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        local x, y = self:GetCenter()
+        local ux, uy = UIParent:GetCenter()
+        if x and y and ux and uy then
+            NexusDB.panelX, NexusDB.panelY = math.floor(x - ux + 0.5), math.floor(y - uy + 0.5)
+        end
+    end)
     frame:Hide()
 
     buildHeaderText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     buildHeaderText:SetPoint("TOP", 0, -8)
-    buildHeaderText:SetSize(314, 17)
+    buildHeaderText:SetSize(274, 17)
     buildHeaderText:SetJustifyH("CENTER")
     buildHeaderText:SetTextColor(0.45, 0.84, 1)
 
     switchBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    switchBtn:SetSize(72, 19)
-    switchBtn:SetPoint("TOP", 0, -26)
-    switchBtn:SetText("Switch")
-    local function HideWishlistMenu()
-        if wishlistMenu then wishlistMenu:Hide() end
-    end
-
-    local function OpenEditorFor(candidate)
-        local A = Nexus and Nexus.GameAdapter
-        if candidate and A and A.Activate then pcall(A.Activate, candidate.slot) end
-        HideWishlistMenu()
-        if Nexus.WishlistEditor then
-            if Nexus.WishlistEditor.OpenForCandidate then
-                Nexus.WishlistEditor.OpenForCandidate(candidate)
-            else
-                Nexus.WishlistEditor.Show()
-            end
-        end
-    end
-
-    local function EnsureWishlistMenu()
-        if wishlistMenu then return wishlistMenu end
-        local menu = CreateFrame("Frame", "NexusWishlistMenu", frame)
-        menu:SetFrameStrata("DIALOG")
-        menu:SetFrameLevel(frame:GetFrameLevel() + 20)
-        menu:SetWidth(260)
-        menu:Hide()
-        pcall(function()
-            menu:SetBackdrop({
-                bgFile="Interface\\Tooltips\\UI-Tooltip-Background",
-                edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",
-                tile=true, tileSize=16, edgeSize=12,
-                insets={left=3,right=3,top=3,bottom=3},
-            })
-            menu:SetBackdropColor(0.025, 0.025, 0.04, 0.98)
-            menu:SetBackdropBorderColor(0.35, 0.35, 0.45, 1)
-        end)
-        menu.title = menu:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        menu.title:SetPoint("TOPLEFT", 12, -10)
-        menu.title:SetText("Select Wishlist")
-        menu.close = CreateFrame("Button", nil, menu, "UIPanelCloseButton")
-        menu.close:SetPoint("TOPRIGHT", 4, 4)
-        menu.rows = {}
-        menu.actions = {}
-        wishlistMenu = menu
-        return menu
-    end
-
-    local function AddMenuButton(menu, index, text, width, onClick)
-        local btn = menu.actions[index]
-        if not btn then
-            btn = CreateFrame("Button", nil, menu, "UIPanelButtonTemplate")
-            menu.actions[index] = btn
-        end
-        btn:SetSize(width, 21)
-        btn:SetText(text)
-        btn:SetScript("OnClick", onClick)
-        btn:Show()
-        return btn
-    end
-
-    local function RefreshWishlistMenu()
-        local menu = EnsureWishlistMenu()
-        local A = Nexus and Nexus.GameAdapter
-        local candidates = A and A.GetWishlistCandidates and A.GetWishlistCandidates() or {}
-        local y = -34
-        for i = 1, math.max(#candidates, #menu.rows) do
-            local row = menu.rows[i]
-            if not row then
-                row = CreateFrame("Frame", nil, menu)
-                row:SetSize(236, 24)
-                row.pick = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-                row.pick:SetPoint("LEFT", 0, 0)
-                row.pick:SetSize(198, 22)
-                row.settings = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-                row.settings:SetPoint("LEFT", row.pick, "RIGHT", 4, 0)
-                row.settings:SetSize(34, 22)
-                row.settings:SetText("...")
-                menu.rows[i] = row
-            end
-            local c = candidates[i]
-            if c then
-                local candidate = c
-                row:SetPoint("TOPLEFT", 12, y)
-                local label = ShortName(candidate.name ~= "" and candidate.name or "Unnamed wishlist", 25)
-                if candidate.active then label = "|cff4dff80> |r" .. label end
-                label = label .. " |cff888888(" .. tostring(candidate.count or 0) .. ")|r"
-                row.pick:SetText(label)
-                row.pick:SetScript("OnClick", function()
-                    if A and A.Activate then pcall(A.Activate, candidate.slot) end
-                    HideWishlistMenu()
-                end)
-                row.settings:SetScript("OnClick", function() OpenEditorFor(candidate) end)
-                row.settings:SetScript("OnEnter", function(self)
-                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                    GameTooltip:AddLine("Wishlist settings", 1, 1, 1)
-                    GameTooltip:AddLine("Activate this wishlist and open its editor.", 0.75, 0.75, 0.75, true)
-                    GameTooltip:Show()
-                end)
-                row.settings:SetScript("OnLeave", function() GameTooltip:Hide() end)
-                row:Show()
-                y = y - 26
-            else
-                row:Hide()
-            end
-        end
-        if #candidates == 0 then
-            menu.empty = menu.empty or menu:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            menu.empty:ClearAllPoints(); menu.empty:SetPoint("TOPLEFT", 14, y)
-            menu.empty:SetText("No wishlist created yet.")
-            menu.empty:Show(); y = y - 25
-        elseif menu.empty then menu.empty:Hide() end
-
-        local create = AddMenuButton(menu, 1, "+ New / Import", 112, function()
-            HideWishlistMenu()
-            if Nexus.WishlistEditor then
-                if Nexus.WishlistEditor.NewWishlist then
-                    Nexus.WishlistEditor.NewWishlist()
-                else
-                    Nexus.WishlistEditor.Show()
-                end
-            end
-        end)
-        create:ClearAllPoints(); create:SetPoint("TOPLEFT", 12, y - 3)
-        local overlay = Nexus.WishlistOverlay
-        local overlayShown = overlay and overlay.IsShown and overlay.IsShown()
-        local toggle = AddMenuButton(menu, 2, overlayShown and "Hide Screen List" or "Show Screen List", 112, function()
-            if Nexus.WishlistOverlay then Nexus.WishlistOverlay.Toggle() end
-            RefreshWishlistMenu()
-        end)
-        toggle:ClearAllPoints(); toggle:SetPoint("LEFT", create, "RIGHT", 6, 0)
-        y = y - 26
-        local display = AddMenuButton(menu, 3, "On-Screen List Settings", 230, function()
-            HideWishlistMenu()
-            if Nexus.WishlistEditor and Nexus.WishlistEditor.ToggleDisplayPopup then
-                Nexus.WishlistEditor.ToggleDisplayPopup()
-            end
-        end)
-        display:ClearAllPoints(); display:SetPoint("TOPLEFT", 12, y - 2)
-        y = y - 31
-        menu:SetHeight(-y + 8)
-    end
-
+    switchBtn:SetSize(90, 19)
+    switchBtn:SetPoint("TOPLEFT", 10, -26)
+    switchBtn:SetText("Swap Build")
     switchBtn:SetScript("OnClick", function()
-        local menu = EnsureWishlistMenu()
-        if menu:IsShown() then menu:Hide(); return end
-        RefreshWishlistMenu()
-        menu:ClearAllPoints()
-        menu:SetPoint("TOP", switchBtn, "BOTTOM", 0, -3)
-        menu:Show()
+        CloseOtherNexusWindows()
+        if Nexus.JournalTab and Nexus.JournalTab.OpenBuilds then
+            Nexus.JournalTab.OpenBuilds()
+        else
+            local pe = _G["ProjectEbonhold"]
+            if pe and pe.EchoJournal and pe.EchoJournal.Show then
+                pcall(pe.EchoJournal.Show, pe.EchoJournal)
+            end
+        end
     end)
     switchBtn:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_TOP")
-        GameTooltip:AddLine("Wishlist menu", 1, 1, 1)
-        GameTooltip:AddLine("Select, create, edit, or configure your on-screen wishlist.", 0.75, 0.75, 0.75, true)
+        GameTooltip:AddLine("Swap Build", 1, 1, 1)
+        GameTooltip:AddLine("Open Loadouts. Select a saved build normally, then assign the wishlist Nexus should progress for it.", 0.75, 0.75, 0.75, true)
         GameTooltip:Show()
     end)
     switchBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
+    -- Clickable compact replacement for Project Ebonhold's difficulty / Soul
+    -- Ash HUD. In-progress builds use a slim header treatment. Completed builds
+    -- expand this into the primary status card so the familiar server metrics
+    -- remain the most visible information.
+    worldStatusBox = CreateFrame("Frame", nil, frame)
+    worldStatusBox:SetFrameLevel(FrameLevelOf(frame) + 3)
+    pcall(function()
+        worldStatusBox:SetBackdrop({
+            bgFile="Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",
+            tile=true, tileSize=16, edgeSize=10,
+            insets={left=2,right=2,top=2,bottom=2},
+        })
+        worldStatusBox:SetBackdropColor(0.018, 0.035, 0.045, 0.96)
+        worldStatusBox:SetBackdropBorderColor(0.16, 0.34, 0.40, 0.9)
+    end)
+
+    worldStatusText = worldStatusBox:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    worldStatusText:SetJustifyH("LEFT")
+    worldStatusText:SetText("")
+
+    worldStatusAsh = worldStatusBox:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    worldStatusAsh:SetJustifyH("LEFT")
+    worldStatusAsh:SetText("")
+
+    worldStatusGain = worldStatusBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    worldStatusGain:SetJustifyH("RIGHT")
+    worldStatusGain:SetText("")
+
+    worldStatusHit = CreateFrame("Button", nil, worldStatusBox)
+    worldStatusHit:SetAllPoints(worldStatusBox)
+    worldStatusHit:SetFrameLevel(FrameLevelOf(worldStatusBox) + 5)
+    worldStatusHit:RegisterForClicks("LeftButtonUp")
+    local statusHighlight = worldStatusHit:CreateTexture(nil, "HIGHLIGHT")
+    statusHighlight:SetAllPoints()
+    pcall(function() statusHighlight:SetTexture(1, 1, 1, 0.06) end)
+    worldStatusHit:SetScript("OnClick", function()
+        if Nexus.ServerStatus and Nexus.ServerStatus.OpenHardcoreMenu then
+            Nexus.ServerStatus.OpenHardcoreMenu()
+        end
+    end)
+    worldStatusHit:SetScript("OnEnter", function(self)
+        local ss = Nexus.ServerStatus and Nexus.ServerStatus.GetSummary and Nexus.ServerStatus.GetSummary() or {}
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine(ss.tier or ss.mode or "Difficulty", 1, 0.25, 0.25)
+        if ss.ash then GameTooltip:AddLine("Soul Ash: " .. tostring(ss.ash):gsub(",",""), 1, 1, 1) end
+        if ss.gain then GameTooltip:AddLine("Soul Ash Multiplier: " .. tostring(ss.gain), 0.2, 1, 0.2) end
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Click to open the Hardcore difficulty panel.", 1, 0.82, 0, true)
+        GameTooltip:Show()
+    end)
+    worldStatusHit:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    worldStatusBox:Hide()
+
     rollArea = CreateFrame("Frame", nil, frame)
     rollArea:SetPoint("TOPLEFT", 10, -52)
-    rollArea:SetSize(320, 104)
+    rollArea:SetSize(280, 104)
 
     statusText = rollArea:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     statusText:SetPoint("TOPLEFT", 2, -1)
-    statusText:SetSize(316, 14)
+    statusText:SetSize(276, 14)
     statusText:SetJustifyH("LEFT")
 
     for i = 1, 3 do
         local fs = rollArea:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         fs:SetPoint("TOPLEFT", 2, -19 - (i - 1) * 14)
-        fs:SetSize(316, 13)
+        fs:SetSize(276, 13)
         fs:SetJustifyH("LEFT")
         cardTexts[i] = fs
     end
 
     recText = rollArea:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     recText:SetPoint("TOPLEFT", 2, -64)
-    recText:SetSize(316, 30)
+    recText:SetSize(276, 30)
     recText:SetJustifyH("LEFT")
     recText:SetJustifyV("TOP")
     recText:SetTextColor(1, 0.82, 0)
 
     rollDivider = rollArea:CreateTexture(nil, "ARTWORK")
-    rollDivider:SetSize(318, 1)
+    rollDivider:SetSize(278, 1)
     rollDivider:SetPoint("BOTTOMLEFT", 1, 0)
     pcall(function() rollDivider:SetTexture(0.3, 0.3, 0.3, 0.65) end)
 
@@ -337,7 +295,7 @@ local function EnsureFrame()
     tomesHit:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     needText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    needText:SetSize(158, 52)
+    needText:SetSize(136, 52)
     needText:SetJustifyH("LEFT")
     needText:SetJustifyV("TOP")
     needText:SetTextColor(1, 0.5, 0.2)
@@ -356,7 +314,16 @@ local function EnsureFrame()
         if #missingNamesCache > 0 then
             GameTooltip:AddLine("Missing Echoes:", 1, 0.65, 0.25)
             for i, name in ipairs(missingNamesCache) do
-                GameTooltip:AddLine("  • " .. name, 0.9, 0.9, 0.9)
+                -- Split "Echo Name ×N (Quality:×N ...)" into label and detail
+                local label, detail = name:match("^(.-)%s+(%b())$")
+                if label and detail then
+                    GameTooltip:AddLine("  • " .. label, 0.9, 0.9, 0.9)
+                    -- Strip outer parens and show quality breakdown indented
+                    local inner = detail:sub(2, -2)
+                    GameTooltip:AddLine("      " .. inner, 0.7, 0.7, 0.7)
+                else
+                    GameTooltip:AddLine("  • " .. name, 0.9, 0.9, 0.9)
+                end
                 if i >= 25 then
                     if #missingNamesCache > 25 then
                         GameTooltip:AddLine("  +" .. (#missingNamesCache - 25) .. " more", 0.6, 0.6, 0.6)
@@ -375,7 +342,7 @@ local function EnsureFrame()
     shedLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     shedLabel:SetText("TO SHED")
     shedText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    shedText:SetSize(158, 46)
+    shedText:SetSize(136, 46)
     shedText:SetJustifyH("LEFT")
     shedText:SetJustifyV("TOP")
     shedText:SetTextColor(0.72, 0.52, 1)
@@ -447,7 +414,7 @@ local function EnsureFrame()
     setupText:SetJustifyH("CENTER")
     setupText:SetTextColor(0.45, 0.84, 1)
     setupHint = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    setupHint:SetSize(312, 34)
+    setupHint:SetSize(272, 34)
     setupHint:SetJustifyH("CENTER")
     setupHint:SetJustifyV("TOP")
 
@@ -455,8 +422,8 @@ local function EnsureFrame()
     -- Direct path to Community Builds since most new players want to
     -- browse a proven build before creating their own from scratch.
     setupGetStartedBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    setupGetStartedBtn:SetSize(160, 26)
-    setupGetStartedBtn:SetText("Browse Nexus Builds")
+    setupGetStartedBtn:SetSize(126, 24)
+    setupGetStartedBtn:SetText("Browse Builds")
     setupGetStartedBtn:SetScript("OnClick", function()
         if Nexus.CommunityBuilds then
             Nexus.CommunityBuilds.Show()
@@ -470,6 +437,21 @@ local function EnsureFrame()
         GameTooltip:Show()
     end)
     setupGetStartedBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    setupImportBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    setupImportBtn:SetSize(126, 24)
+    setupImportBtn:SetText("Import / Create")
+    setupImportBtn:SetScript("OnClick", function()
+        CloseOtherNexusWindows()
+        if Nexus.WishlistEditor then Nexus.WishlistEditor.Show() end
+    end)
+    setupImportBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine("Import or create a wishlist", 1, 1, 1)
+        GameTooltip:AddLine("Paste a wishlist string or build one directly in Nexus.", 0.9, 0.9, 0.9, true)
+        GameTooltip:Show()
+    end)
+    setupImportBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     autoBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     autoBtn:SetSize(78, 22)
@@ -496,36 +478,107 @@ local function EnsureFrame()
     autoBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     leaderboardBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    leaderboardBtn:SetSize(90, 22)
-    leaderboardBtn:SetPoint("LEFT", autoBtn, "RIGHT", 4, 0)
+    leaderboardBtn:SetSize(104, 22)
+    leaderboardBtn:SetPoint("LEFT", autoBtn, "RIGHT", 5, 0)
     leaderboardBtn:SetText("Leaderboard")
-    leaderboardBtn:SetScript("OnClick", function() if Nexus.Leaderboard then Nexus.Leaderboard.Show() end end)
+    leaderboardBtn:SetScript("OnClick", function()
+        CloseOtherNexusWindows()
+        if Nexus.Leaderboard then Nexus.Leaderboard.Show() end
+    end)
     leaderboardBtn:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_TOP")
-        GameTooltip:AddLine("Nexus Leaderboard", 1, 1, 1)
-        GameTooltip:AddLine("See the highest DPS recorded for each exact Echo loadout.", 0.9, 0.9, 0.9, true)
-        GameTooltip:AddLine("Separate rankings for Training Dummy and Lich King.", 0.9, 0.9, 0.9, true)
+        GameTooltip:AddLine("Leaderboard", 1, 1, 1)
+        GameTooltip:AddLine("Compare personal and global records for exact Echo builds.", 0.8, 0.8, 0.8, true)
         GameTooltip:Show()
     end)
     leaderboardBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-    buildsBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    buildsBtn:SetSize(106, 22)
-    buildsBtn:SetPoint("LEFT", leaderboardBtn, "RIGHT", 4, 0)
-    buildsBtn:SetText("Nexus Builds")
-    buildsBtn:SetScript("OnClick", function() if Nexus.CommunityBuilds then Nexus.CommunityBuilds.Show() end end)
-    buildsBtn:SetScript("OnEnter", function(self)
+    menuBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    menuBtn:SetSize(82, 22)
+    menuBtn:SetPoint("LEFT", leaderboardBtn, "RIGHT", 5, 0)
+    menuBtn:SetText("More")
+    menuBtn:SetScript("OnClick", function(self)
+        if type(EasyMenu) ~= "function" then return end
+        NexusDB = NexusDB or {}
+        local items = {
+            {
+                text = showPerformance and "Hide Performance" or "Show Performance",
+                notCheckable = true,
+                func = function()
+                    showPerformance = not showPerformance
+                    NexusDB.uiShowPerformance = showPerformance
+                    if M.Refresh then M.Refresh() end
+                end,
+            },
+
+            {
+                text = "Wishlist Editor",
+                notCheckable = true,
+                func = function() CloseOtherNexusWindows(); if Nexus.WishlistEditor then Nexus.WishlistEditor.Show() end end,
+            },
+            {
+                text = (Nexus.ServerStatus and Nexus.ServerStatus.IsUsingNexusHud and Nexus.ServerStatus.IsUsingNexusHud())
+                    and "Use Server Difficulty / Soul Ash HUD" or "Use Nexus Difficulty / Soul Ash HUD",
+                notCheckable = true,
+                disabled = not (Nexus.ServerStatus and Nexus.ServerStatus.IsDetected and Nexus.ServerStatus.IsDetected()),
+                func = function()
+                    if Nexus.ServerStatus then
+                        Nexus.ServerStatus.SetMode(Nexus.ServerStatus.IsUsingNexusHud() and "server" or "nexus")
+                    end
+                end,
+            },
+            {
+                text = "Reset Panel Position",
+                notCheckable = true,
+                func = function()
+                    NexusDB.panelX, NexusDB.panelY = nil, nil
+                    frame:ClearAllPoints()
+                    frame:SetPoint("RIGHT", UIParent, "RIGHT", -40, 0)
+                end,
+            },
+            {
+                text = "Hide Nexus Panel",
+                notCheckable = true,
+                func = function() M.Hide() end,
+            },
+        }
+        M._moreMenu = M._moreMenu or CreateFrame("Frame", "NexusPanelMoreMenu", UIParent, "UIDropDownMenuTemplate")
+        EasyMenu(items, M._moreMenu, self, 0, 0, "MENU")
+    end)
+    menuBtn:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_TOP")
-        GameTooltip:AddLine("Community Builds", 1, 1, 1)
-        GameTooltip:AddLine("Browse, share, and copy exact Echo loadouts from other players.", 0.9, 0.9, 0.9, true)
-        GameTooltip:AddLine("Syncs automatically over the local player mesh.", 0.9, 0.9, 0.9, true)
+        GameTooltip:AddLine("More", 1, 1, 1)
+        GameTooltip:AddLine("Performance display, builds, wishlists, Soul Ash HUD, and panel controls.", 0.8, 0.8, 0.8, true)
         GameTooltip:Show()
     end)
-    buildsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    menuBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    bestDpsText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    bestDpsText:SetPoint("BOTTOM", frame, "BOTTOM", 0, 33)
+    bestDpsText:SetSize(280, 14)
+    bestDpsText:SetJustifyH("CENTER")
+    bestDpsText:SetText("|cff888888Best DPS: hit a training dummy to record|r")
+    bestDpsHit = HitFrame(frame, bestDpsText)
+    bestDpsHit:SetScript("OnEnter", function(self)
+        local info = Nexus.DpsCapture and Nexus.DpsCapture.GetPlayerInfo and Nexus.DpsCapture.GetPlayerInfo(UnitName("player"))
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine("Character Best DPS", 1, 1, 1)
+        if info then
+            GameTooltip:AddLine(FmtDps(info.dps) .. " DPS · " .. (info.category == "lk" and "Lich King" or "Training Dummy"), 0.35, 1, 0.45)
+            if info.title then GameTooltip:AddLine(info.title, 0.65, 0.85, 1) end
+        else
+            GameTooltip:AddLine("No recorded DPS yet.", 0.7, 0.7, 0.7)
+            GameTooltip:AddLine("Fight a training dummy for at least 10 seconds to establish your first record.", 0.9, 0.9, 0.9, true)
+        end
+        GameTooltip:Show()
+    end)
+    bestDpsHit:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     versionText = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    versionText:SetPoint("BOTTOMRIGHT", -8, 10)
-    versionText:SetJustifyH("RIGHT")
+    versionText:Hide() -- version remains in /nexus and tooltips; avoids bottom-row overlap
+
+    NexusDB = NexusDB or {}
+    showPerformance = NexusDB.uiShowPerformance == true
 
     pcall(function()
         frame:SetBackdrop({
@@ -584,7 +637,7 @@ local function EnsureMinimapButton()
     end)
     btn:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-        GameTooltip:AddLine("|cff7fd5ffNexus|r")
+        GameTooltip:AddLine("|cff7fd5ffNexus|r  |cff888888" .. SafeText(Nexus.VERSION) .. "|r")
         GameTooltip:AddLine("Echo build automation · Community Builds · DPS Leaderboard", 0.6,0.8,1,true)
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine("Left-click: HUD  |  Right-click: Wishlists  |  Drag to reposition", 0.7,0.7,0.7,true)
@@ -627,7 +680,7 @@ local function PositionPerformance(topY, completed)
         SetPoint(lkGlobalValue, "TOPLEFT", frame, "TOPLEFT", left + labelW, topY - 111)
         lkGlobalValue:SetSize(valueW, 14); lkGlobalValue:SetJustifyH("RIGHT")
     else
-        local left, width = 174, 154
+        local left, width = 154, 134
         SetPoint(performanceLabel, "TOPLEFT", frame, "TOPLEFT", left, topY)
         performanceLabel:SetSize(width, 13)
         performanceLabel:SetJustifyH("LEFT")
@@ -635,7 +688,7 @@ local function PositionPerformance(topY, completed)
         setLabelText:SetSize(width, 13)
         setLabelText:SetJustifyH("LEFT")
 
-        local labelW, valueW = 92, 62
+        local labelW, valueW = 78, 56
         SetPoint(dummyLabel, "TOPLEFT", frame, "TOPLEFT", left, topY - 38)
         dummyLabel:SetSize(labelW, 14); dummyLabel:SetJustifyH("LEFT")
         SetPoint(dummyValue, "TOPLEFT", frame, "TOPLEFT", left + labelW, topY - 38)
@@ -728,8 +781,51 @@ function M.Toggle()
     if f:IsShown() then f:Hide(); userHidden = true else f:Show(); userHidden = false end
 end
 
+local function LayoutServerStatus(completed)
+    worldStatusBox:ClearAllPoints()
+    worldStatusText:ClearAllPoints()
+    worldStatusAsh:ClearAllPoints()
+    worldStatusGain:ClearAllPoints()
+
+    if completed then
+        worldStatusBox:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -33)
+        worldStatusBox:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -12, -33)
+        worldStatusBox:SetHeight(44)
+
+        worldStatusText:SetPoint("TOPLEFT", worldStatusBox, "TOPLEFT", 9, -5)
+        worldStatusText:SetSize(155, 17)
+        worldStatusText:SetJustifyH("LEFT")
+
+        worldStatusAsh:SetPoint("BOTTOMLEFT", worldStatusBox, "BOTTOMLEFT", 9, 5)
+        worldStatusAsh:SetSize(180, 17)
+        worldStatusAsh:SetJustifyH("LEFT")
+
+        worldStatusGain:SetPoint("BOTTOMRIGHT", worldStatusBox, "BOTTOMRIGHT", -9, 6)
+        worldStatusGain:SetSize(66, 13)
+        worldStatusGain:SetJustifyH("RIGHT")
+    else
+        worldStatusBox:SetPoint("TOPLEFT", switchBtn, "TOPRIGHT", 5, 3)
+        worldStatusBox:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -23)
+        worldStatusBox:SetHeight(22)
+
+        worldStatusText:SetPoint("LEFT", worldStatusBox, "LEFT", 6, 0)
+        worldStatusText:SetSize(48, 16)
+        worldStatusText:SetJustifyH("LEFT")
+
+        worldStatusAsh:SetPoint("LEFT", worldStatusText, "RIGHT", 3, 0)
+        worldStatusAsh:SetPoint("RIGHT", worldStatusGain, "LEFT", -3, 0)
+        worldStatusAsh:SetHeight(16)
+        worldStatusAsh:SetJustifyH("LEFT")
+
+        worldStatusGain:SetPoint("RIGHT", worldStatusBox, "RIGHT", -6, 0)
+        worldStatusGain:SetSize(54, 14)
+        worldStatusGain:SetJustifyH("RIGHT")
+    end
+end
+
 function M.Render(model)
     if type(model) ~= "table" then return end
+    M._lastModel = model
     EnsureFrame()
 
     local pr = type(model.progress) == "table" and model.progress or {}
@@ -742,8 +838,8 @@ function M.Render(model)
     local activeRoll = #cards > 0 or recommendation ~= ""
     local noBuild = total <= 0 or not name
 
-    buildHeaderText:SetText(name and ("|cff7fd5ff" .. ShortName(name, 34) .. "|r" .. (pr.isCommunityPreview and " |cff888888[Preview]|r" or "")) or "|cff7fd5ffNexus|r")
-    switchBtn:SetText(noBuild and "Choose" or "Switch")
+    buildHeaderText:SetText(name and ("|cff7fd5ff" .. ShortName(name, 28) .. "|r" .. (pr.isCommunityPreview and " |cff888888[Preview]|r" or "")) or "|cff7fd5ffNexus|r")
+    switchBtn:SetText("Swap Build")
 
     SetVisible(rollArea, activeRoll)
     if activeRoll then
@@ -761,31 +857,42 @@ function M.Render(model)
     unknownTomesCache = type(pr.unknownTomes) == "table" and pr.unknownTomes or {}
 
     SetVisible(setupText, noBuild); SetVisible(setupHint, noBuild)
-    SetVisible(setupGetStartedBtn, noBuild)
+    SetVisible(setupGetStartedBtn, noBuild); SetVisible(setupImportBtn, noBuild)
     SetVisible(completeBadge, complete and not noBuild); SetVisible(completeSubtext, complete and not noBuild)
     ShowCoreProgress(not noBuild and not complete)
-    ShowPerformance(not noBuild)
+    ShowPerformance(not noBuild and showPerformance)
 
     local contentTop = activeRoll and -166 or -58
+
+    if not complete then
+        switchBtn:ClearAllPoints()
+        switchBtn:SetPoint("TOPLEFT", 10, -26)
+        switchBtn:SetSize(90, 19)
+    end
 
     if noBuild then
         SetVisible(dummyGlobalValue, false)
         SetVisible(lkGlobalValue, false)
-        frame:SetHeight(activeRoll and 258 or 172)
+        frame:SetHeight(activeRoll and 332 or 218)
         SetPoint(setupText, "TOP", frame, "TOP", 0, contentTop - 18)
-        setupText:SetText("Choose a build to track")
+        setupText:SetText("Set up your build")
         SetPoint(setupHint, "TOP", frame, "TOP", 0, contentTop - 48)
-        setupHint:SetText("Nexus tracks your progress, automates your Echo board, and records DPS for your exact loadout.")
-        SetPoint(setupGetStartedBtn, "TOP", frame, "TOP", 0, contentTop - 100)
-        setupGetStartedBtn:SetPoint("CENTER", frame, "CENTER", 0, contentTop > -58 and -80 or -60)
+        setupHint:SetText("Use your finished build, import a wishlist, or copy a proven community build.")
+        setupGetStartedBtn:ClearAllPoints()
+        setupGetStartedBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 18, contentTop - 94)
+        setupImportBtn:ClearAllPoints()
+        setupImportBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -18, contentTop - 94)
     elseif complete then
-        frame:SetHeight(activeRoll and 348 or 242)
-        SetPoint(completeBadge, "TOP", frame, "TOP", 0, contentTop)
-        completeBadge:SetSize(320, 14)
-        completeBadge:SetJustifyH("CENTER")
-        completeBadge:SetText("WISHLIST COMPLETE  |cffb8b8b8·  " .. owned .. " / " .. total .. "|r")
+        -- Once a build is complete, progress text stops being the purpose of the
+        -- HUD. The panel becomes a compact replacement for the stock difficulty /
+        -- Soul Ash tracker, with Nexus navigation and the player's best DPS.
+        frame:SetHeight(showPerformance and (activeRoll and 382 or 274) or (activeRoll and 236 or 146))
+        SetVisible(completeBadge, false)
         SetVisible(completeSubtext, false)
-        PositionPerformance(contentTop - 25, true)
+        switchBtn:ClearAllPoints()
+        switchBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -12, -7)
+        switchBtn:SetSize(82, 19)
+        if showPerformance then PositionPerformance(activeRoll and -214 or -106, true) end
         SetVisible(setLabelText, false)
         SetVisible(lkPersonalLabel, true)
         SetVisible(dummyGlobalValue, true)
@@ -794,7 +901,7 @@ function M.Render(model)
         SetVisible(dummyGlobalValue, false)
         SetVisible(lkGlobalValue, false)
         SetVisible(setLabelText, true)
-        frame:SetHeight(activeRoll and 346 or 240)
+        frame:SetHeight(showPerformance and (activeRoll and 388 or 280) or (activeRoll and 328 or 222))
         SetPoint(progressLabel, "TOPLEFT", frame, "TOPLEFT", 12, contentTop)
         SetPoint(progressValue, "TOPLEFT", frame, "TOPLEFT", 12, contentTop - 17)
         progressValue:SetText(string.format("%d / %d complete", owned, total))
@@ -821,34 +928,97 @@ function M.Render(model)
             tomesLabel:Hide()
             tomesValue:Hide()
             tomesHit:Hide()
-            needText:SetWidth(156)
+            needText:SetWidth(136)
         end
 
         SetPoint(needText, "TOPLEFT", frame, "TOPLEFT", 12, contentTop - 58)
         local needLines = {}
         local shown = math.min(#missingNamesCache, 2)
-        for i = 1, shown do needLines[#needLines + 1] = missingNamesCache[i] end
+        for i = 1, shown do
+            -- Strip " (Poor:×N Common:×N ...)" from HUD label — quality
+            -- breakdown is in the tooltip on mouseover instead.
+            needLines[#needLines + 1] = missingNamesCache[i]:gsub("%s+%b()", "")
+        end
         if #missingNamesCache > shown then needLines[#needLines + 1] = "+" .. (#missingNamesCache - shown) .. " more" end
         needText:SetText(#needLines > 0 and table.concat(needLines, "\n") or "|cff888888No remaining demand|r")
 
-        SetPoint(shedLabel, "TOPLEFT", frame, "TOPLEFT", 12, contentTop - 108)
-        SetPoint(shedText, "TOPLEFT", frame, "TOPLEFT", 12, contentTop - 124)
+        if showPerformance then
+            SetPoint(shedLabel, "TOPLEFT", frame, "TOPLEFT", 12, contentTop - 108)
+            SetPoint(shedText, "TOPLEFT", frame, "TOPLEFT", 12, contentTop - 124)
+            shedText:SetWidth(136)
+        else
+            SetPoint(shedLabel, "TOPLEFT", frame, "TOPLEFT", 154, contentTop - 42)
+            SetPoint(shedText, "TOPLEFT", frame, "TOPLEFT", 154, contentTop - 58)
+            shedText:SetWidth(134)
+        end
         local shedLines = {}
         local shedShown = math.min(#shedNamesCache, 2)
         for i = 1, shedShown do shedLines[#shedLines + 1] = shedNamesCache[i] end
         if #shedNamesCache > shedShown then shedLines[#shedLines + 1] = "+" .. (#shedNamesCache - shedShown) .. " more" end
         shedText:SetText(#shedLines > 0 and table.concat(shedLines, "\n") or "|cff888888None|r")
 
-        PositionPerformance(contentTop, false)
+        if showPerformance then PositionPerformance(contentTop, false) end
         SetVisible(lkPersonalLabel, false)
     end
 
     if not noBuild then RenderPerformance(pr, complete) end
+
+    local usingNexusStatus = Nexus.ServerStatus and Nexus.ServerStatus.IsUsingNexusHud and Nexus.ServerStatus.IsUsingNexusHud()
+    local ss = usingNexusStatus and Nexus.ServerStatus.GetSummary and Nexus.ServerStatus.GetSummary() or nil
+    LayoutServerStatus(complete and not noBuild)
+    if ss and (ss.tier or ss.mode or ss.ash or ss.gain) then
+        local difficulty = ss.tier or ss.mode or "Difficulty"
+        -- Parse and format the ash number for compact display
+        local function FmtAsh(raw)
+            if not raw then return "—" end
+            local stripped = tostring(raw):gsub(",", "")
+            local n = tonumber(stripped)
+            if not n then return tostring(raw) end
+            if n >= 1000000 then
+                local m = n / 1000000
+                local ms = string.format("%.1f", m); return (ms:match("%.0$") and ms:gsub("%.0$","") or ms) .. "M"
+            elseif n >= 1000 then
+                local k = n / 1000
+                local ks = string.format("%.1f", k); return (ks:match("%.0$") and ks:gsub("%.0$","") or ks) .. "k"
+            end
+            return tostring(math.floor(n))
+        end
+        local ashFmt = FmtAsh(ss.ash)
+        -- Tooltip keeps full unformatted value
+        local ashFull = ss.ash and tostring(ss.ash):gsub(",","") or "—"
+        worldStatusText:SetText("|cffff6b5f" .. difficulty .. "|r")
+        worldStatusAsh:SetText((complete and "|cff8ec9d6Soul Ash  |r" or "|cffb8b8b8Ash |r") .. "|cffffffff" .. ashFmt .. "|r")
+        worldStatusGain:SetText(ss.gain and ("|cff35e635" .. ss.gain .. "|r") or "")
+        worldStatusBox:Show()
+    else
+        worldStatusText:SetText("")
+        worldStatusAsh:SetText("")
+        worldStatusGain:SetText("")
+        worldStatusBox:Hide()
+    end
+
+    -- Character best is always visible in every HUD state, independent of
+    -- whether the wishlist is incomplete, complete, or not configured yet.
+    local playerInfo = Nexus.DpsCapture and Nexus.DpsCapture.GetPlayerInfo and Nexus.DpsCapture.GetPlayerInfo(UnitName("player"))
+    if playerInfo and tonumber(playerInfo.dps) then
+        local encounter = playerInfo.category == "lk" and "Lich King" or "Dummy"
+        bestDpsText:SetText("|cffb8b8b8Best DPS:|r  |cff4dff80" .. FmtDps(playerInfo.dps) .. "|r  |cff888888" .. encounter .. "|r")
+    else
+        bestDpsText:SetText("|cff888888Best DPS: hit a training dummy to record|r")
+    end
+    bestDpsText:ClearAllPoints()
+    if complete and not noBuild and not activeRoll and not showPerformance then
+        bestDpsText:SetPoint("TOP", frame, "TOP", 0, -84)
+    else
+        bestDpsText:SetPoint("BOTTOM", frame, "BOTTOM", 0, 33)
+    end
+    bestDpsText:Show()
+    bestDpsHit:Show()
     autoBtn:SetText(AutoLabel(model.auto))
-    versionText:SetText(SafeText(model.version))
     if not userHidden then frame:Show() end
 end
 
+function M.Refresh() if M._lastModel then M.Render(M._lastModel) end end
 function M.Show() userHidden = false; EnsureFrame():Show() end
 function M.Hide() if frame then frame:Hide() end; userHidden = true end
 function M.IsShown() return frame and frame:IsShown() or false end

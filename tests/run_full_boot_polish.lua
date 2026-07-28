@@ -6,6 +6,7 @@ dofile("data/DefaultProfile.lua")
 dofile("logic/Model.lua")
 dofile("logic/Strategy.lua")
 dofile("logic/Ratchet.lua")
+dofile("logic/Relay.lua")
 dofile("logic/Policy.lua")
 dofile("core/Store.lua")
 dofile("core/GameAdapter.lua")
@@ -32,7 +33,8 @@ H.Advance(2)
 -- quick-start must have fired exactly once by now (real wishlist present)
 local qsFrame = _G.NexusQuickStart
 assert(qsFrame and qsFrame:IsShown(), "quick-start never showed during real boot")
-assert(qsFrame.body.text:find("Nexus is ready"), "wrong quick-start content for has-wishlist boot")
+assert(qsFrame.body.text:find("Already have a finished build", 1, true),
+    "wrong quick-start content for real boot")
 print("quick-start fires correctly during a real Main.lua boot -- OK")
 
 -- dismiss and advance further -- must not reappear

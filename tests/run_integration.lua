@@ -19,6 +19,7 @@ dofile("data/DefaultProfile.lua")
 dofile("logic/Model.lua")
 dofile("logic/Strategy.lua")
 dofile("logic/Ratchet.lua")
+dofile("logic/Relay.lua")
 dofile("logic/Policy.lua")
 dofile("core/Store.lua")
 dofile("core/GameAdapter.lua")
@@ -37,19 +38,35 @@ H.wishlist = { name = "MyBuild", class = "MAGE", echoes = {
     { spellId = 200110, quality = 0, stacks = 1 },
 } }
 
+local function DesignedWishlistEchoes()
+    return {
+        { spellId = 200100, quality = 3, stacks = 1, locked = false },
+        { spellId = 200102, quality = 2, stacks = 1, locked = false },
+        { spellId = 200104, quality = 2, stacks = 3, locked = false },
+        { spellId = 200110, quality = 0, stacks = 1, locked = false },
+    }
+end
+
 ------------------------------------------------------------------------
 -- S1: boot at level 1; SPELLS_CHANGED-before-PEW guard; solo picker
 ------------------------------------------------------------------------
 H.playerLevel = 1
 H.FireEvent("ADDON_LOADED", "Nexus")
-check(H.ChatContains("nexus for commands") or H.ChatContains("Nexus"), "S1 addon initialized on ADDON_LOADED")
 H.FireEvent("SPELLS_CHANGED")
 H.FireEvent("PLAYER_ENTERING_WORLD")
+check(H.ChatContains("nexus for commands") or H.ChatContains("Nexus"),
+    "S1 addon initialized after PLAYER_ENTERING_WORLD")
 check(H.optSettings.autoAcceptLoadoutEchoes == false,
     "S1 client auto-accept disabled (sole picker)")
 check((H.slotRequests or 0) >= 1, "S1 RequestServerBuildSlots fired on load")
 
 local A = Nexus.GameAdapter
+
+local function AssociateSnapshot(snapshotSlot, wishlistSlot)
+    local ok, err = A.SetLoadoutWishlist(snapshotSlot, wishlistSlot)
+    check(ok, "test fixture associated Snapshot " .. tostring(snapshotSlot)
+        .. " with wishlist " .. tostring(wishlistSlot) .. ": " .. tostring(err))
+end
 
 ------------------------------------------------------------------------
 -- S2: catalog -- lever conformance, families, corrected class mask
@@ -72,6 +89,7 @@ check(cat.playerMask == 128, "S2 corrected MAGE class mask")
 -- levers are disable-able. 200700 (Lone Tome) is NOT discovered -> skip it.
 H.discovered = { [200200] = 1, [200400] = 1, [200402] = 1 }
 H.DeliverDiscovery({})     -- discovery synced, nothing disabled
+local activatesBeforeArm = #H.activateCalls
 H.DeliverSlots({
     [2] = { slot = 2, name = "Main", verified = true, echoes = {
         { spellId = 200100, quality = 3, stacks = 1, locked = false },
@@ -79,20 +97,14 @@ H.DeliverSlots({
         { spellId = 200104, quality = 2, stacks = 2, locked = false },
         { spellId = 200202, quality = 1, stacks = 1, locked = false },
     } },
-    [3] = { slot = 3, name = "Design", verified = false, echoes = {
-        -- the designed "Echo Wishlist" build IS the wishlist under the
-        -- corrected target resolution -- keep it identical to the intended
-        -- fixture (Alpha, Beta, Double Strike x3, Gamma) or S4/S5's
-        -- premises silently change out from under them
-        { spellId = 200100, quality = 3, stacks = 1, locked = false },
-        { spellId = 200102, quality = 2, stacks = 1, locked = false },
-        { spellId = 200104, quality = 2, stacks = 3, locked = false },
-        { spellId = 200110, quality = 0, stacks = 1, locked = false },
-    } },
-}, 0)
+    [3] = { slot = 3, name = "Design", verified = false,
+        echoes = DesignedWishlistEchoes() },
+}, 2)
+AssociateSnapshot(2, 3)
 H.Advance(8)               -- clears the 3s build-op spacing, runs ARM ticks
-check(#H.activateCalls >= 1 and H.activateCalls[1] == 2,
-    "S3 activated the verified snapshot slot 2 (never the designed slot)")
+check(#H.activateCalls == activatesBeforeArm
+        and A.Slots().activeSlot == 2,
+    "S3 preserves the user-selected active Snapshot instead of switching builds")
 
 local function CountWire(prefix)
     local n = 0
@@ -145,8 +157,8 @@ H.DeliverBoard({
 H.Advance(1.2)
 check(H.selectCalls[#H.selectCalls] == 200102,
     "S5 took the wanted free card over guaranteed filler")
-check(H.ChatContains("flag demoted"),
-    "S5 disabled-lever echo appearing guaranteed demoted DISABLE_SUPPRESSES_GUARANTEE")
+check(Nexus.Store.State().flagDemotions.DISABLE_SUPPRESSES_GUARANTEE ~= nil,
+    "S5 disabled-lever guarantee demoted DISABLE_SUPPRESSES_GUARANTEE")
 H.ResolveSelect(true)
 H.Advance(0.5)
 
@@ -262,8 +274,10 @@ H.DeliverSlots({
         { spellId = 200104, quality = 2, stacks = 2, locked = false },
         { spellId = 200202, quality = 1, stacks = 1, locked = false },
     } },
-    [3] = { slot = 3, name = "Design", verified = false, echoes = {} },
+    [3] = { slot = 3, name = "Design", verified = false,
+        echoes = DesignedWishlistEchoes() },
 }, 2)
+AssociateSnapshot(2, 3)
 H.granted = {
     ["Alpha Strike"] = { { spellId = 200100, stack = 1, maxStack = 1, quality = 3 } },
     ["Beta Guard"] = { { spellId = 200102, stack = 1, maxStack = 1, quality = 2 } },
@@ -277,8 +291,8 @@ H.granted = {
 H.playerLevel = 80
 H.Perks.currentChoice = nil      -- final board already consumed
 H.Advance(8)
-check(#H.saveCalls >= 1 and H.saveCalls[#H.saveCalls].slot == 2,
-    "S13 dominating run saved into the active slot")
+check(#H.saveCalls >= 1 and H.saveCalls[#H.saveCalls].slot ~= 2,
+    "S13 dominating run saved into an inactive relay Snapshot")
 local savesAfter = #H.saveCalls
 H.Advance(4)
 check(#H.saveCalls == savesAfter, "S13 save fires only once per visit")
@@ -305,6 +319,12 @@ check(#H.saveCalls == savesBefore,
 H.playerLevel = 5
 H.Advance(0.3)
 H.wishlist = nil
+A.ClearLoadoutWishlist(2)
+H.DeliverSlots({
+    [2] = { slot = 2, name = "Main", verified = true, echoes = {
+        { spellId = 200100, quality = 3, stacks = 1, locked = false },
+    } },
+}, 2)
 local selBefore = #H.selectCalls
 H.DeliverBoard({
     { spellId = 200102, quality = 2 },
@@ -363,9 +383,8 @@ H.Perks.currentChoice = nil
 H.Advance(0.3)
 
 ------------------------------------------------------------------------
--- S19: auto-banish through the whole Main->Policy->Adapter seam
--- (junk board, guaranteed FILLER at index 3): the worst FREE card is
--- banished with the client's 0-BASED index, never the guaranteed card
+-- S19: an unusable filler guarantee does not suppress search. Nexus safely
+-- Banishes an off-wishlist side while preserving wished families.
 ------------------------------------------------------------------------
 H.PushRunData({ remainingBanishes = 2, totalFreezes = 2, usedFreezes = 0,
     totalRerolls = 0, usedRerolls = 0 })
@@ -374,20 +393,18 @@ H.PushRunData({ remainingBanishes = 2, totalFreezes = 2, usedFreezes = 0,
 -- this scenario's "owned duplicate" premise to hold.
 H.granted = { ["Alpha Strike"] = { { spellId = 200100, stack = 1, maxStack = 1, quality = 3 } } }
 local banishesB4 = #H.banishCalls
+local selectsB4 = #H.selectCalls
 H.DeliverBoard({
     { spellId = 200302, quality = 0 },                       -- filler (worst)
     { spellId = 200100, quality = 3 },                       -- owned duplicate
     { spellId = 200300, quality = 0, isGuaranteed = true },  -- filler, flag-3
 })
 H.Advance(1.5)
-check(#H.banishCalls == banishesB4 + 1 and H.banishCalls[#H.banishCalls] == 0,
-    "S19 auto-banish sent the WORST free card as client 0-based index 0")
-H.ResolveBanish(200110, 0)
--- the banish replacement 200110 is a WANTED family (Gamma Bolt), so the
--- addon correctly auto-takes it next; resolve that select so no in-flight
--- latch leaks into later scenarios.
-H.Advance(1.2)
-if H.Perks.pendingSelectSpellId then H.ResolveSelect(true) end
+check(#H.banishCalls == banishesB4 + 1,
+    "S19 unusable guaranteed filler permits a safe search Banish")
+check(#H.selectCalls == selectsB4,
+    "S19 did not drain the unusable guarantee before search")
+H.ResolveBanish(200102, 2)
 H.Perks.currentChoice = nil
 H.Advance(0.3)
 
@@ -440,6 +457,7 @@ H.Advance(0.3)
 H.saveBlackhole = true
 H.playerLevel = 5
 H.Advance(0.3)
+A.RunBoundaryReset()
 H.granted = {
     ["Alpha Strike"] = { { spellId = 200100, stack = 1, maxStack = 1, quality = 3 } },
     ["Beta Guard"] = { { spellId = 200102, stack = 1, maxStack = 1, quality = 2 } },
@@ -447,8 +465,10 @@ H.granted = {
 H.DeliverSlots({
     [2] = { slot = 2, name = "Main", verified = true, echoes = {
         { spellId = 200100, quality = 3, stacks = 1, locked = false } } },
-    [3] = { slot = 3, name = "D", verified = false, echoes = {} },
+    [3] = { slot = 3, name = "D", verified = false,
+        echoes = DesignedWishlistEchoes() },
 }, 2)
+AssociateSnapshot(2, 3)
 H.buildBusyUntil = -1
 H.playerLevel = 80
 H.Perks.currentChoice = nil
@@ -467,6 +487,7 @@ check(#H.saveCalls == saveAfterConfirm, "S22 stops retrying once the save is con
 ------------------------------------------------------------------------
 H.playerLevel = 5
 H.Advance(0.3)
+A.RunBoundaryReset()
 H.granted = {
     ["Alpha Strike"] = { { spellId = 200100, stack = 1, maxStack = 1, quality = 3 } },
     ["Beta Guard"] = { { spellId = 200102, stack = 1, maxStack = 1, quality = 2 } },
@@ -475,8 +496,10 @@ H.granted = {
 H.DeliverSlots({
     [2] = { slot = 2, name = "Main", verified = true, echoes = {
         { spellId = 200100, quality = 3, stacks = 1, locked = false } } },  -- covers {Alpha}
-    [3] = { slot = 3, name = "D", verified = false, echoes = {} },
+    [3] = { slot = 3, name = "D", verified = false,
+        echoes = DesignedWishlistEchoes() },
 }, 2)
+AssociateSnapshot(2, 3)
 H.buildBusyUntil = -1
 H.playerLevel = 80
 H.Perks.currentChoice = nil
@@ -505,6 +528,15 @@ H.wishlist = { name = "Frostbite Tank", class = "MAGE", echoes = {
     { spellId = 200100, quality = 3, stacks = 1 },
     { spellId = 200104, quality = 2, stacks = 3 },
 } }
+H.DeliverSlots({
+    [2] = { slot = 2, name = "Snap", verified = true, echoes = {
+        { spellId = 200100, quality = 3, stacks = 1, locked = false } } },
+    [3] = { slot = 3, name = "Frostbite Tank", verified = false, echoes = {
+        { spellId = 200100, quality = 3, stacks = 1, locked = false },
+        { spellId = 200104, quality = 2, stacks = 3, locked = false },
+    } },
+}, 2)
+AssociateSnapshot(2, 3)
 local chatB4 = #H.chat
 SlashCmdList["NEXUS"]("wishlist")
 check(H.ChatContains("Frostbite Tank") ~= nil,
@@ -515,9 +547,10 @@ H.DeliverSlots({
     [2] = { slot = 2, name = "Snap", verified = true, echoes = {
         { spellId = 200100, quality = 3, stacks = 1, locked = false } } },
 }, 2)
+A.ClearLoadoutWishlist(2)
 SlashCmdList["NEXUS"]("wishlist")
-check(H.ChatContains("no wishlist detected") ~= nil,
-    "S25 /wr wishlist reports none when no active loadout and no designed build")
+check(H.ChatContains("no wishlist association") ~= nil,
+    "S25 /wr wishlist explains the missing active-Snapshot association")
 
 ------------------------------------------------------------------------
 -- S26: the DESIGNED "Echo Wishlist" build (verified=false server slot) is

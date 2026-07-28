@@ -2,6 +2,28 @@
 
 All notable public changes to Nexus are documented here.
 
+## 1.17
+
+### Guarantee convergence
+
+- Rejects a guaranteed Echo when its exact quality is below the wishlist target; the wished family remains protected from Banish.
+- Uses final-selection Banish/Reroll search while preserving a frozen or confirmed-held wanted fallback.
+- Preserves the latest multi-board level-80 horizon handling and refusal recovery.
+- Adds a safe two-Snapshot relay: improvements save only to an inactive empty or weaker same-wishlist Snapshot, then arm on the next level-1 visit after exact verification.
+- Adds stable per-Snapshot wishlist associations so the active guarantee source and its intended wishlist cannot drift apart.
+
+### Scoring and safety
+
+- Counts explicit multi-quality wishlist tiers correctly instead of rejecting a lower tier the player requested.
+- Scores requested stack progress when choosing between saved Snapshots.
+- Never overwrites the active Snapshot, an unrelated Snapshot, an unverified Snapshot, or a stronger same-wishlist Snapshot.
+- Keeps protocol-7 DPS identity validation, owner verification, mesh backfill, and peer-presence hardening from the latest public code.
+
+### Interface and diagnostics
+
+- Adds the release HUD, Snapshot association controls, server-status view, bounded support diagnostic export, and one-time 1.17 release notes.
+- Defers heavy UI initialization until the player enters the world.
+
 ## 1.1
 
 ### Added

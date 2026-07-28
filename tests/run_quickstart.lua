@@ -4,12 +4,13 @@ dofile("ui/QuickStart.lua")
 NexusDB = {}
 local QS = Nexus.QuickStart
 
--- first time: no wishlist -> should show, with the "get one" content
+-- first time: should show the four-path release setup
 QS.ShowIfFirstTime(false)
 local frame = _G.NexusQuickStart
 assert(frame and frame:IsShown(), "guide did not show on first launch")
-assert(frame.body.text:find("Nexus Builds"), "missing-wishlist content not shown")
-print("first-time guide shows with the no-wishlist content -- OK")
+assert(frame.body.text:find("Starting fresh", 1, true),
+    "first-launch path guidance not shown")
+print("first-time guide shows the release setup paths -- OK")
 
 -- dismiss it
 local gotIt
@@ -22,7 +23,8 @@ QS.ShowIfFirstTime(false)
 assert(not frame:IsShown(), "guide showed again after being dismissed once")
 print("guide never shows again after dismissal -- OK")
 
--- fresh account, wishlist ALREADY present -> different content
+-- fresh account with a wishlist already present still gets the same concise
+-- path chooser; it is intentionally not a separate tutorial branch.
 NexusDB2 = {}
 _G.NexusQuickStart = nil
 NexusDB.hasSeenQuickStart = nil
@@ -31,5 +33,6 @@ local QS2 = Nexus.QuickStart
 QS2.ShowIfFirstTime(true)
 local frame2 = _G.NexusQuickStart
 assert(frame2:IsShown(), "guide did not show for the has-wishlist case")
-assert(frame2.body.text:find("Nexus is ready"), "has-wishlist content not shown")
-print("first-time guide shows different content when a wishlist already exists -- OK")
+assert(frame2.body.text:find("Already have a finished build", 1, true),
+    "current-build path not shown")
+print("first-time guide remains useful when a wishlist already exists -- OK")

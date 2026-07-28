@@ -49,7 +49,9 @@ Nexus recommends what to take, freeze, banish, or reroll based on your selected 
 - **Auto ON:** Nexus handles supported Echo choices.
 - **Auto OFF:** You make the choices while Nexus shows its recommendation and reasoning.
 
-Nexus accounts for guaranteed Echoes, freeze and banish sequencing, quality requirements, stack quantities, temporary filler, and saved loadout convergence.
+Nexus accounts for guaranteed Echoes, freeze and banish sequencing, exact quality requirements, stack quantities, temporary filler, and safe two-Snapshot convergence.
+
+Only the active Snapshot supplies guaranteed Echoes, and the active Snapshot cannot be overwritten. Nexus therefore saves a confirmed improvement into an inactive Snapshot and arms that exact Snapshot on the next level-1 visit. Unrelated, unverified, or stronger Snapshots are never overwritten.
 
 ### Wishlist Progress
 
@@ -65,7 +67,7 @@ The HUD shows:
 
 Browse builds shared by other Nexus users, filter by class, preview Echoes, and copy an exact build into your own wishlist.
 
-Nexus 1.1 uses a throttled peer-to-peer sync system. **Sync now** requests build summaries and DPS records from online Nexus users, then safely backfills missing exact loadouts. Nexus also performs a delayed, rate-limited sync after login.
+Nexus 1.17 uses a throttled peer-to-peer sync system. **Sync now** requests build summaries and DPS records from online Nexus users, then safely backfills missing exact loadouts. Nexus also performs a delayed, rate-limited sync after login.
 
 ### DPS Leaderboards
 
@@ -79,8 +81,9 @@ Each record is tied to the exact Echo IDs and stack quantities used during the p
 2. Log in or type `/reload`.
 3. Open Nexus with the minimap button or `/nexus`.
 4. Import an in-game loadout, create a wishlist, or copy a Community Build.
-5. Press **Switch** on the Nexus HUD and select the wishlist you want to use.
-6. Leave **Auto ON** for supported automation, or use **Auto OFF** for manual choices with recommendations.
+5. In the Echo Journal, associate the active saved Snapshot with the wishlist Nexus should progress.
+6. Keep a second unlocked Snapshot slot empty, or associate a weaker second Snapshot with the same wishlist, so Nexus can relay improvements safely.
+7. Leave **Auto ON** for supported automation, or use **Auto OFF** for manual choices with recommendations.
 
 ## Commands
 
@@ -144,7 +147,7 @@ Interface\AddOns\Nexus-main\Nexus\Nexus.toc
 
 ## Source Code
 
-The complete Nexus 1.1 source code is publicly available in this repository.
+The complete Nexus 1.17 source code is publicly available in this repository.
 
 Developers may clone or download the repository source. Players should install the prepared [Nexus.zip release](https://github.com/Solkex/Nexus/releases/latest/download/Nexus.zip) instead.
 

@@ -64,7 +64,7 @@ local function Rows()
     local out = {}
     for _, row in ipairs(rows) do
         local build = row.build or {}
-        local class = tostring(row.class or build.class or "UNKNOWN"):upper()
+        local class = tostring(build.class or "UNKNOWN"):upper()
         local classOk = classFilter == "ALL" or class == classFilter
         local searchOk = query == ""
             or tostring(row.player or ""):lower():find(query,1,true)
@@ -121,7 +121,7 @@ end
 
 local function EnsureDetail(parent)
     if detail then return end
-    detail = CreateFrame("Frame",nil,parent); detail:SetSize(345,466); detail:SetPoint("TOPRIGHT",-18,-86); SetBackdrop(detail,0.9)
+    detail = CreateFrame("Frame",nil,parent); detail:SetSize(345,530); detail:SetPoint("TOPRIGHT",-18,-86); SetBackdrop(detail,0.9)
     detail.title = detail:CreateFontString(nil,"OVERLAY","GameFontNormalLarge")
     detail.title:SetPoint("TOPLEFT",14,-14); detail.title:SetSize(315,22); detail.title:SetJustifyH("LEFT")
     detail.owner = detail:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
@@ -130,19 +130,42 @@ local function EnsureDetail(parent)
     detail.record:SetPoint("TOPLEFT",14,-64); detail.record:SetSize(315,34); detail.record:SetJustifyH("LEFT"); detail.record:SetJustifyV("TOP")
     detail.desc = detail:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
     detail.desc:SetPoint("TOPLEFT",14,-105); detail.desc:SetSize(315,58); detail.desc:SetJustifyH("LEFT"); detail.desc:SetJustifyV("TOP")
+
+    -- Locked perks section (up to 6 permanent echoes, shown above rolled echoes)
+    detail.lockedTitle = detail:CreateFontString(nil,"OVERLAY","GameFontDisableSmall")
+    detail.lockedTitle:SetPoint("TOPLEFT",14,-170); detail.lockedTitle:SetText("LOCKED ECHOES")
+    detail.lockedIcons = {}
+    for i = 1, 6 do
+        local b = CreateFrame("Button",nil,detail); b:SetSize(34,34)
+        b:SetPoint("TOPLEFT", 14 + (i-1)*38, -184)
+        b.icon = b:CreateTexture(nil,"ARTWORK"); b.icon:SetAllPoints(b)
+        b.border = b:CreateTexture(nil,"OVERLAY")
+        b.border:SetAllPoints(b)
+        pcall(function() b.border:SetTexture("Interface\\Buttons\\UI-ActionButton-Border") end)
+        b:SetScript("OnEnter", function(self)
+            if self.tip then
+                GameTooltip:SetOwner(self,"ANCHOR_TOP")
+                GameTooltip:SetSpellByID(self.tip)
+                GameTooltip:Show()
+            end
+        end)
+        b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        b:Hide(); detail.lockedIcons[i] = b
+    end
+
     detail.echoTitle = detail:CreateFontString(nil,"OVERLAY","GameFontDisableSmall")
-    detail.echoTitle:SetPoint("TOPLEFT",14,-170); detail.echoTitle:SetText("EXACT LOADOUT")
+    detail.echoTitle:SetPoint("TOPLEFT",14,-234); detail.echoTitle:SetText("EXACT LOADOUT")
     detail.icons = {}
     for i=1,80 do
         local b = CreateFrame("Button",nil,detail); b:SetSize(23,23)
         local col=(i-1)%10; local row=math.floor((i-1)/10)
-        b:SetPoint("TOPLEFT",14+col*30,-188-row*27)
+        b:SetPoint("TOPLEFT",14+col*30,-252-row*27)
         b.icon=b:CreateTexture(nil,"ARTWORK"); b.icon:SetAllPoints(b)
         b.count=b:CreateFontString(nil,"OVERLAY","NumberFontNormalSmall"); b.count:SetPoint("BOTTOMRIGHT",1,-1)
         b:Hide(); detail.icons[i]=b
     end
     detail.more = detail:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
-    detail.more:SetPoint("TOPLEFT",14,-410); detail.more:SetSize(315,18); detail.more:SetJustifyH("LEFT")
+    detail.more:SetPoint("TOPLEFT",14,-474); detail.more:SetSize(315,18); detail.more:SetJustifyH("LEFT")
     detail.copy = CreateFrame("Button",nil,detail,"UIPanelButtonTemplate")
     detail.copy:SetSize(138,24); detail.copy:SetPoint("BOTTOMLEFT",14,14); detail.copy:SetText("Copy Exact Build")
     detail.copy:SetScript("OnClick",function()
@@ -166,28 +189,65 @@ local function RenderDetail(row)
     if not detail then return end
     detail.row = row
     if not row then
-        detail.title:Hide(); detail.owner:Hide(); detail.record:Hide(); detail.desc:Hide(); detail.echoTitle:Hide(); detail.more:Hide(); detail.copy:Hide(); detail.open:Hide()
+        detail.title:Hide(); detail.owner:Hide(); detail.record:Hide(); detail.desc:Hide()
+        detail.echoTitle:Hide(); detail.more:Hide(); detail.copy:Hide(); detail.open:Hide()
+        detail.lockedTitle:Hide()
+        for _, b in ipairs(detail.lockedIcons) do b:Hide() end
         for _, b in ipairs(detail.icons) do b:Hide() end
         detail.empty:Show(); return
     end
-    detail.empty:Hide(); detail.title:Show(); detail.owner:Show(); detail.record:Show(); detail.desc:Show(); detail.echoTitle:Show(); detail.more:Show(); detail.copy:Show(); detail.open:Show()
-    local b=row.build or {}; local c=CLASS_COLOR[tostring(row.class or b.class or ""):upper()] or {1,1,1}
+    detail.empty:Hide(); detail.title:Show(); detail.owner:Show(); detail.record:Show()
+    detail.desc:Show(); detail.echoTitle:Show(); detail.more:Show(); detail.copy:Show(); detail.open:Show()
+
+    -- Locked perks row
+    local locked = row.lockedEchoes or {}
+    if #locked > 0 then
+        detail.lockedTitle:Show()
+        for i, btn in ipairs(detail.lockedIcons) do
+            local e = locked[i]
+            if e then
+                btn.icon:SetTexture(SpellIcon(e.spellId or e.id))
+                btn.tip = tonumber(e.spellId or e.id)
+                btn:Show()
+            else
+                btn:Hide()
+            end
+        end
+    else
+        detail.lockedTitle:Hide()
+        for _, btn in ipairs(detail.lockedIcons) do btn:Hide() end
+    end
+
+    local b=row.build or {}; local c=CLASS_COLOR[tostring(b.class or ""):upper()] or {1,1,1}
     detail.title:SetText(b.title or "Record Loadout"); detail.title:SetTextColor(c[1],c[2],c[3])
     detail.owner:SetText("by "..tostring(b.author or row.player or "?"))
-    detail.record:SetText(string.format("|cff4dff80%s DPS|r  •  Lv%d", DpsText(row.dps), tonumber(row.level) or 0))
+    detail.record:SetText(string.format("|cff4dff80%s DPS|r  •  %s  •  Lv%d",DpsText(row.dps),DurationText(row.duration),tonumber(row.level) or 0))
     detail.desc:SetText((b.description and b.description~="") and b.description or "No build description provided.")
     local echoes=row.echoes or b.echoes or {}; local shown=math.min(#echoes,#detail.icons)
     for i, btn in ipairs(detail.icons) do
         local e=echoes[i]
         if i<=shown and e then btn.icon:SetTexture(SpellIcon(e.spellId or e.id)); local n=tonumber(e.stacks or e.count) or 1; btn.count:SetText(n>1 and n or ""); btn:Show() else btn:Hide() end
     end
-    detail.more:SetText(#echoes==0 and "Exact loadout not downloaded yet. Click Open Build to request it." or (#echoes>shown and ("+"..(#echoes-shown).." more Echo entries") or (tostring(#echoes).." Echo entries")))
+    do
+        local totalSlots = 0
+        for _, e in ipairs(echoes) do totalSlots = totalSlots + (tonumber(e.stacks or e.count) or 1) end
+        if #echoes == 0 then
+            detail.more:SetText("Exact loadout is still completing its background sync.")
+        elseif #echoes > shown then
+            detail.more:SetText("+" .. (#echoes-shown) .. " more  ·  " .. totalSlots .. " Echo slots total")
+        else
+            detail.more:SetText(tostring(totalSlots) .. " Echo slots")
+        end
+    end
     if #echoes > 0 then detail.copy:Enable() else detail.copy:Disable() end
 end
 
 local function EnsureFrame()
     if frame then return frame end
-    frame=CreateFrame("Frame","NexusLeaderboardFrame",UIParent); frame:SetSize(980,570); frame:SetPoint("CENTER"); frame:SetFrameStrata("DIALOG"); frame:SetFrameLevel(55)
+    frame=CreateFrame("Frame","NexusLeaderboardFrame",UIParent)
+    frame:SetClampedToScreen(true)
+    UISpecialFrames = UISpecialFrames or {}
+    table.insert(UISpecialFrames, "NexusLeaderboardFrame"); frame:SetSize(980,570); frame:SetPoint("CENTER"); frame:SetFrameStrata("DIALOG"); frame:SetFrameLevel(55)
     frame:EnableMouse(true); frame:SetMovable(true); frame:RegisterForDrag("LeftButton"); frame:SetScript("OnDragStart",function(self) self:StartMoving() end); frame:SetScript("OnDragStop",function(self) self:StopMovingOrSizing() end); frame:Hide()
     pcall(function() frame:SetBackdrop({bgFile="Interface\\DialogFrame\\UI-DialogBox-Background",edgeFile="Interface\\DialogFrame\\UI-DialogBox-Border",tile=true,tileSize=32,edgeSize=32,insets={left=11,right=12,top=12,bottom=11}}) end)
     local title=frame:CreateFontString(nil,"OVERLAY","GameFontNormalLarge"); title:SetPoint("TOP",0,-14); title:SetText("Nexus Leaderboard")
@@ -227,7 +287,7 @@ function M.Refresh()
     ReleaseRows(); local rows=Rows(); local selected=nil
     for i,row in ipairs(rows) do
         local r=GetRow(listChild); r:SetWidth(575); r:ClearAllPoints(); r:SetPoint("TOPLEFT",0,-(i-1)*(ROW_H+2)); r.data=row
-        local class=tostring(row.class or (row.build or {}).class or "UNKNOWN"):upper(); local c=CLASS_COLOR[class] or {0.8,0.8,0.8}
+        local class=tostring((row.build or {}).class or "UNKNOWN"):upper(); local c=CLASS_COLOR[class] or {0.8,0.8,0.8}
         r.rank:SetText(i<=3 and "|cffffd200"..i.."|r" or tostring(i)); r.icon:SetTexture(CLASS_ICON[class] or "Interface\\Icons\\INV_Misc_QuestionMark")
         r.player:SetText(tostring(row.player or "?")); r.player:SetTextColor(c[1],c[2],c[3])
         r.build:SetText(tostring((row.build or {}).title or "Record Loadout"))
@@ -244,7 +304,7 @@ function M.Refresh()
 end
 
 function M.Init(adapter) Adapter=adapter end
-function M.Show(mode) EnsureFrame(); if mode=="lk" or mode=="dummy" then category=mode end; frame:Show(); M.Refresh() end
+function M.Show(mode) EnsureFrame(); if Nexus.Panel and Nexus.Panel.CloseOtherWindows then Nexus.Panel.CloseOtherWindows("NexusLeaderboardFrame") end; if mode=="lk" or mode=="dummy" then category=mode end; frame:Show(); M.Refresh() end
 function M.Hide() if frame then frame:Hide() end end
 function M.Toggle(mode) EnsureFrame(); if frame:IsShown() then frame:Hide() else M.Show(mode) end end
 function M.SetCategory(mode) if mode=="lk" then category="lk" else category="dummy" end; selectedKey=nil; M.Refresh() end

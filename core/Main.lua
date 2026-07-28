@@ -7,9 +7,9 @@
 -- any closure that reads it.
 
 Nexus = Nexus or {}
-Nexus.VERSION = "1.0"
+Nexus.VERSION = "1.17"
 
-local Model, Policy, Ratchet, Strategy, Store, Adapter
+local Model, Policy, Ratchet, Relay, Strategy, Store, Adapter
 local Readout, Panel, JournalTab, DefaultProfile
 local initialized = false
 local autoEnabled = true          -- session-level master switch (panel button / slash)
@@ -38,12 +38,20 @@ local lastDecidedSig, lastDecision, decidedAt = nil, nil, nil
 local lastLoggedSig = nil        -- decision-log dedupe per board
 local lastBoardForRerollWatch = nil
 local frozeThisBoard = nil       -- board signature we already spent a freeze on
+local refusedFinalBanishSig = nil
+local refusedFinalRerollSig = nil
 local externalPauseUntil = 0
 
 -- SAVE state
 local savedThisVisit = false
 local slotsRefreshAt = nil
-local saveVerifySlot, saveVerifyAt, seedVerify = nil, nil, nil
+local saveVerifySlot, saveVerifyAt, seedVerify, saveVerifySnap = nil, nil, nil, nil
+local saveVerifyExpectedActive, saveVerifySummary = nil, nil
+local saveVerifyRelay = nil
+local noChangeReportedVisit = false
+local saveGateAuditedVisit = false
+local auditRunId = 0
+local auditRunStarted = nil
 local lastLevelSeen = nil
 local demotionsClearedThisSession = false
 
@@ -56,6 +64,43 @@ end
 
 local function SetStatus(s)
     if s ~= statusLine then statusLine = s end
+end
+
+-- Diagnostic-only retained history. These records never participate in
+-- decisions; they exist solely to explain guarantee behavior and save gates.
+local function CopyCounts(src)
+    local out = {}
+    if type(src) == "table" then
+        for fam, n in pairs(src) do
+            n = tonumber(n) or 0
+            if n ~= 0 then out[tostring(fam)] = n end
+        end
+    end
+    return out
+end
+
+local function AppendAudit(kind, fields)
+    if type(NexusDB) ~= "table" then return end
+    NexusDB.runAudit = NexusDB.runAudit or {}
+    local e = fields or {}
+    e.kind = kind
+    e.t = date and date("%H:%M:%S") or ""
+    e.run = auditRunId
+    local a = NexusDB.runAudit
+    a[#a + 1] = e
+    while #a > 60 do table.remove(a, 1) end
+end
+
+local function WishedCounts(counts, plan)
+    local out = {}
+    local wished = type(plan) == "table" and plan.wishedFamilies or nil
+    if type(counts) == "table" and type(wished) == "table" then
+        for fam in pairs(wished) do
+            local n = tonumber(counts[fam]) or tonumber(counts[tostring(fam)]) or 0
+            if n ~= 0 then out[tostring(fam)] = n end
+        end
+    end
+    return out
 end
 
 local function EffectiveFlags()
@@ -71,7 +116,8 @@ local function DemoteFlag(name, reason)
     st.flagDemotions = st.flagDemotions or {}
     if not st.flagDemotions[name] then
         st.flagDemotions[name] = reason
-        Print("|cffff6060flag demoted:|r " .. name .. " -- " .. reason)
+        -- Log internally; this is an advisor-mode state change that players
+        -- don't need to see in chat.
     end
 end
 
@@ -104,6 +150,8 @@ end
 -- 9 needed copies contributes only 1 toward the total, not a full
 -- credit; "missing" lists anything not yet at its FULL target, whether
 -- that's zero copies or a partial stack still short.
+local QUALITY_NAMES = { [0]="Common", [1]="Uncommon", [2]="Rare", [3]="Epic" }
+local function QualityName(q) return QUALITY_NAMES[q] or ("q"..q) end
 local function WishlistProgress(plan, owned, catalog)
     local stackTotal, stackCount, missing = 0, 0, {}
     if type(plan) ~= "table" or type(plan.wishedFamilies) ~= "table" then
@@ -111,16 +159,47 @@ local function WishlistProgress(plan, owned, catalog)
     end
     local targets = type(plan.targets) == "table" and plan.targets or {}
     local byFamily = (type(owned) == "table" and owned.byFamily) or {}
+    local bySpell  = (type(owned) == "table" and owned.bySpell)  or {}
     for fam in pairs(plan.wishedFamilies) do
         local target = targets[fam]
         local want = (type(target) == "table" and tonumber(target.targetStacks)) or 1
         stackTotal = stackTotal + want
-        local have = byFamily[fam] or 0
-        stackCount = stackCount + math.min(have, want)
+        local have = math.min(tonumber(byFamily[fam]) or 0, want)
+        stackCount = stackCount + have
         if have < want then
             local nm = catalog and catalog.familyName and catalog.familyName[fam]
             local remain = want - have
-            missing[#missing + 1] = tostring(nm or fam) .. (remain > 1 and (" ×" .. remain) or "")
+            local tiers = type(target) == "table" and target.qualityTiers
+            if tiers and #tiers > 1 then
+                -- Use per-quality bySpell counts for accurate tier breakdown.
+                local rows = catalog and catalog.rows or {}
+                local members = (catalog and catalog.familyMembers
+                    and catalog.familyMembers[fam]) or {}
+                local tierParts = {}
+                for _, tier in ipairs(tiers) do
+                    local ownedThisTier = 0
+                    for _, mid in ipairs(members) do
+                        local mr = rows[mid]
+                        if mr and (tonumber(mr.quality) or 0) == tier.q then
+                            ownedThisTier = ownedThisTier + (tonumber(bySpell[mid]) or 0)
+                        end
+                    end
+                    if #members == 0 and tier.spellId then
+                        ownedThisTier = tonumber(bySpell[tier.spellId]) or 0
+                    end
+                    local tierRemain = math.max(0, tier.n - ownedThisTier)
+                    if tierRemain > 0 then
+                        tierParts[#tierParts + 1] = QualityName(tier.q) .. ":×" .. tierRemain
+                    end
+                end
+                local label = tostring(nm or fam) .. " ×" .. remain
+                if #tierParts > 0 then
+                    label = label .. " (" .. table.concat(tierParts, " ") .. ")"
+                end
+                missing[#missing + 1] = label
+            else
+                missing[#missing + 1] = tostring(nm or fam) .. (remain > 1 and (" ×" .. remain) or "")
+            end
         end
     end
     table.sort(missing)
@@ -145,6 +224,76 @@ end
 -- copies) and the LOCKED echo names (server build-slot locks -- distinct
 -- from the wishlist's own "locked" concept, these are echoes pinned in
 -- the saved snapshot itself).
+
+local function FamilyCountsFromEchoes(echoes, catalog)
+    local out = {}
+    for i = 1, #(echoes or {}) do
+        local e = echoes[i]
+        local fam = e and (e.family or (catalog and catalog.familyOf and catalog.familyOf[e.spellId]))
+        if fam then out[fam] = (out[fam] or 0) + (tonumber(e.stacks) or 1) end
+    end
+    return out
+end
+
+local function SlotMatchesSnapshot(row, snap, catalog)
+    if type(row) ~= "table" or type(row.echoes) ~= "table" or type(snap) ~= "table" then
+        return false
+    end
+    local actual = FamilyCountsFromEchoes(row.echoes, catalog)
+    for fam, n in pairs(snap) do
+        if (tonumber(actual[fam]) or 0) ~= (tonumber(n) or 0) then return false end
+    end
+    for fam, n in pairs(actual) do
+        if (tonumber(snap[fam]) or 0) ~= (tonumber(n) or 0) then return false end
+    end
+    return true
+end
+
+local function SaveChangeSummary(owned, incumbentEchoes, plan, catalog)
+    local before = FamilyCountsFromEchoes(incumbentEchoes, catalog)
+    local after = (owned and owned.byFamily) or {}
+    local wished = (plan and plan.wishedFamilies) or {}
+    local targets = (plan and plan.targets) or {}
+    local gained, shed = {}, {}
+    local beforeProgress, afterProgress = 0, 0
+
+    for fam in pairs(wished) do
+        local target = targets[fam]
+        local cap = (type(target) == "table" and tonumber(target.targetStacks)) or 1
+        if cap < 1 then cap = 1 end
+        local b = math.min(tonumber(before[fam]) or 0, cap)
+        local a = math.min(tonumber(after[fam]) or 0, cap)
+        beforeProgress = beforeProgress + b
+        afterProgress = afterProgress + a
+        local d = a - b
+        local name = catalog and catalog.familyName and catalog.familyName[fam] or tostring(fam)
+        if d > 0 then
+            gained[#gained + 1] = name .. (d > 1 and (" x" .. d) or "")
+        elseif d < 0 then
+            local n = -d
+            shed[#shed + 1] = name .. (n > 1 and (" x" .. n) or "")
+        end
+    end
+
+    table.sort(gained); table.sort(shed)
+    local net = afterProgress - beforeProgress
+    local lead = net > 0 and ("wishlist progress +" .. net) or "loadout cleaned up"
+    if #gained > 0 and #shed > 0 then
+        return lead .. " — gained " .. table.concat(gained, ", ")
+            .. "; shed " .. table.concat(shed, ", ")
+    elseif #gained > 0 then
+        return lead .. " — gained " .. table.concat(gained, ", ")
+    elseif #shed > 0 then
+        return lead .. " — shed " .. table.concat(shed, ", ")
+    end
+    return lead
+end
+
+local function NextMissingEcho(plan, owned, catalog)
+    local _, _, missing = WishlistProgress(plan, owned, catalog)
+    return missing[1] or "the remaining wishlist Echoes"
+end
+
 local function LoadoutCoverage(activeRow, plan, catalog)
     if type(activeRow) ~= "table" or type(activeRow.echoes) ~= "table"
         or type(plan) ~= "table" or type(plan.wishedFamilies) ~= "table" then
@@ -284,34 +433,90 @@ local function RenderIdlePanel(plan, owned, slots, catalog)
     })
 end
 
+local function LoadoutAssociationKeys(slots)
+    local out = {}
+    if type(slots) ~= "table" or type(slots.bySlot) ~= "table" then return out end
+    for slot, row in pairs(slots.bySlot) do
+        if type(slot) == "number" and type(row) == "table"
+            and type(row.echoes) == "table" and #row.echoes > 0 then
+            local linked = Adapter.GetLoadoutWishlist
+                and Adapter.GetLoadoutWishlist(slot)
+            if linked and linked.key ~= nil then out[slot] = linked.key end
+        end
+    end
+    return out
+end
+
+-- A confirmed improvement is saved into an inactive Snapshot because the
+-- server does not permit overwriting the active Snapshot. At the next level-1
+-- visit, arm that exact verified peer only while the player is still on the
+-- source Snapshot and both slots still point at the same wishlist.
+local function StepRelayArm(slots)
+    local st = Store.State()
+    local pending = st and st.relayPending
+    if type(pending) ~= "table" then return false end
+
+    local decision, detail = Relay.ArmDecision({
+        pending = pending,
+        slots = slots,
+        associations = LoadoutAssociationKeys(slots),
+    })
+    local target = tonumber(pending.targetSlot)
+    if decision == "wait" then
+        SetStatus(detail)
+        return true
+    end
+    if decision == "cancel" then
+        st.relayPending = nil
+        armTargetSlot, armPendingSince = nil, nil
+        armAttempts = 0
+        SetStatus("snapshot relay cancelled: " .. tostring(detail))
+        return false
+    end
+    if decision == "confirmed" then
+        st.relayPending = nil
+        armTargetSlot, armPendingSince = target, nil
+        armedConfirmed = true
+        SetStatus("improved Snapshot " .. tostring(target)
+            .. " armed; wishlist guarantees updated")
+        return false
+    end
+    if decision ~= "activate" or not target then return false end
+
+    local now = GetTime()
+    if armTargetSlot == target and armPendingSince
+        and (now - armPendingSince) < 5 then
+        SetStatus("arming improved Snapshot " .. target .. " -- confirming")
+        return true
+    end
+    if armAttempts >= 3 then
+        SetStatus("arm Snapshot " .. target
+            .. " manually in My Builds; relay save is preserved")
+        return false
+    end
+
+    local ok, err = Adapter.Activate(target)
+    if ok then
+        armTargetSlot = target
+        armPendingSince = now
+        armAttempts = armAttempts + 1
+        SetStatus("arming improved Snapshot " .. target .. " -- confirming")
+        return true
+    end
+    if tostring(err) ~= "spacing" then armAttempts = armAttempts + 1 end
+    SetStatus("waiting to arm improved Snapshot " .. target)
+    return true
+end
+
 local function StepArm(level, plan, owned, slots, disabledLevers)
     local settings = Store.Settings()
-    -- (a) activate best verified snapshot. Advisor mode (no wishlist) is
-    -- read-only: never auto-arm a snapshot the user didn't ask for
-    -- (BestSlot would pick an arbitrary least-filler slot).
-    if settings.autoActivate and slots and not plan.advisorOnly then
-        local best = Ratchet.BestSlot(slots, plan, Adapter.Catalog())
-        -- SS-541 failures (combat/dead/...) are consumed invisibly by the
-        -- client: retry the SAME target on a 5s timer until SS-542 moves
-        -- activeSlot, bounded at 3 attempts
-        local retryDue = armTargetSlot == best and armPendingSince
-            and (GetTime() - armPendingSince) > 5
-        if best and best ~= slots.activeSlot and armAttempts < 3
-            and (armTargetSlot ~= best or retryDue) then
-            local ok = Adapter.Activate(best)
-            if ok then
-                armAttempts = armAttempts + 1
-                armTargetSlot = best
-                armPendingSince = GetTime()
-                armedConfirmed, boardsSinceArm = false, 0
-                SetStatus("activating snapshot slot " .. best
-                    .. (armAttempts > 1 and (" (attempt " .. armAttempts .. ")") or ""))
-            end
-        elseif best and best ~= slots.activeSlot and armAttempts >= 3 then
-            SetStatus("activation not confirmed after 3 tries -- in combat/dead? activate manually")
-        elseif not best and not ActiveSlotRow(slots) then
-            SetStatus("Seeding run -- no verified snapshot to arm")
-        end
+    StepRelayArm(slots)
+    -- (a) Loadout selection is owned by the stock Echo Journal. Each saved
+    -- loadout has its own Nexus wishlist association. The only automatic switch
+    -- is the verified same-wishlist relay above; arbitrary "best" slots remain
+    -- user-controlled so Nexus cannot silently move the player to another build.
+    if slots and not ActiveSlotRow(slots) then
+        SetStatus("Choose a saved loadout in My Builds at level 1")
     end
     -- (b) disable off-wishlist conformant tome levers (one send per 0.5s)
     if settings.autoDisable and plan and not plan.advisorOnly
@@ -424,13 +629,21 @@ local function StepRun(level, plan, slots, owned, flags, disabledLevers)
     local queue = Ratchet.PredictQueue(activeRow and activeRow.echoes or {},
         owned, plan, flags, disabledLevers, catalog)
     local charges = Adapter.Charges()
+    local horizon = Adapter.Horizon()
     local state = {
         board = board, owned = owned, charges = charges, plan = plan,
         queue = queue, flags = flags, level = level, catalog = catalog,
-        horizon = Adapter.Horizon(),
-        canFreeze = (level < 80) and (frozeThisBoard ~= board.signature),
+        horizon = horizon,
+        canFreeze = (level < 80
+            or (type(horizon) == "number" and horizon > 1))
+            and (frozeThisBoard ~= board.signature),
         support = Model.Support(catalog, owned, level, disabledLevers, plan, DefaultProfile.params),
         params = DefaultProfile.params,
+        allowBanish = settings.autoBanish ~= false,
+        searchRefused = {
+            banish = refusedFinalBanishSig == board.signature,
+            reroll = refusedFinalRerollSig == board.signature,
+        },
     }
     local action = Policy.Decide(state)
 
@@ -456,23 +669,43 @@ local function StepRun(level, plan, slots, owned, flags, disabledLevers)
             local entry = {
                 t = date and date("%H:%M:%S") or "",
                 level = level,
-                sig = board.signature,
+                horizon = horizon,
                 gIndex = board.guaranteedIndex,
                 charges = { b = charges.banish, r = charges.reroll,
                             f = charges.freeze, ok = charges.trustworthy },
                 proposal = { type = action.type, spellId = action.spellId,
                              index = action.index, reason = action.reason,
-                             steps = action.steps },
+                             endgame = action.endgame },
                 cards = {},
                 pending = (function()
                     local out = {}
-                    for _, qe in ipairs(queue.entries or {}) do
+                    local total = #(queue.entries or {})
+                    for qi = 1, math.min(12, total) do
+                        local qe = queue.entries[qi]
                         if type(qe) == "table" and qe.family then
                             out[#out + 1] = tostring(qe.family)
                                 .. (qe.wanted and "*" or "")
                         end
                     end
+                    if total > 12 then out[#out + 1] = "...+" .. tostring(total - 12) end
                     return table.concat(out, ",")
+                end)(),
+                run = auditRunId,
+                activeSlot = slots and slots.activeSlot or 0,
+                queueN = #(queue.entries or {}),
+                queueHead = (function()
+                    local out = {}
+                    for qi = 1, math.min(8, #(queue.entries or {})) do
+                        local qe = queue.entries[qi]
+                        if type(qe) == "table" then
+                            out[#out + 1] = {
+                                id = tonumber(qe.spellId) or 0,
+                                fam = tostring(qe.family or ""),
+                                wished = qe.wanted and true or false,
+                            }
+                        end
+                    end
+                    return out
                 end)(),
             }
             for i = 1, #board.cards do
@@ -491,7 +724,9 @@ local function StepRun(level, plan, slots, owned, flags, disabledLevers)
                     wished = (plan.wishedFamilies and fam
                         and plan.wishedFamilies[fam]) and true or false,
                     wishQ = Model.EffectiveWishedQuality
-                        and Model.EffectiveWishedQuality(plan, catalog, fam) or nil,
+                        and Model.EffectiveWishedQuality(plan, catalog, fam,
+                            (owned and owned.byFamily and fam and owned.byFamily[fam]) or 0,
+                            owned and owned.bySpell) or nil,
                     owned = (owned and owned.byFamily and fam
                         and owned.byFamily[fam]) or 0,
                     delta = action.deltas and action.deltas[i],
@@ -499,7 +734,28 @@ local function StepRun(level, plan, slots, owned, flags, disabledLevers)
                 }
             end
             log[#log + 1] = entry
-            while #log > 500 do table.remove(log, 1) end
+            while #log > 200 do table.remove(log, 1) end
+
+            if auditRunStarted ~= auditRunId then
+                auditRunStarted = auditRunId
+                local slotCounts = activeRow and FamilyCountsFromEchoes(activeRow.echoes, catalog) or {}
+                local exact = {}
+                for _, ae in ipairs((activeRow and activeRow.echoes) or {}) do
+                    exact[#exact + 1] = {
+                        id = tonumber(ae.spellId) or 0,
+                        fam = tostring(ae.family or ""),
+                        q = tonumber(ae.quality) or -1,
+                        n = tonumber(ae.stacks) or 1,
+                    }
+                end
+                AppendAudit("RUN_START", {
+                    level = level,
+                    activeSlot = slots and slots.activeSlot or 0,
+                    wishlist = (Adapter.Wishlist() and Adapter.Wishlist().name) or "",
+                    incumbent = WishedCounts(slotCounts, plan),
+                    exact = exact,
+                })
+            end
         end
     end
 
@@ -566,6 +822,10 @@ local function StepRun(level, plan, slots, owned, flags, disabledLevers)
         local ok, err = Adapter.Banish(action.index - 1)
         if ok then
             SetStatus(string.format("|cffff6666Banished|r echo #%d", action.index))
+        elseif action.endgame then
+            refusedFinalBanishSig = board.signature
+            lastDecidedSig = nil
+            SetStatus("final-search Banish refused -- re-evaluating")
         end
     elseif action.type == "freeze" then
         -- one freeze per board; the follow-up banish/reroll happens on a
@@ -579,8 +839,14 @@ local function StepRun(level, plan, slots, owned, flags, disabledLevers)
             frozeThisBoard = board.signature   -- refused: do not retry this board
         end
     elseif action.type == "reroll" then
-        lastBoardForRerollWatch = board
-        Adapter.Reroll()
+        local ok = Adapter.Reroll()
+        if ok then
+            lastBoardForRerollWatch = board
+        elseif action.endgame then
+            refusedFinalRerollSig = board.signature
+            lastDecidedSig = nil
+            SetStatus("final-search Reroll refused -- taking held Echo")
+        end
     end
 end
 
@@ -599,18 +865,107 @@ local function StepSave(level, plan, slots, owned)
     local catalog = Adapter.Catalog()
     local incumbent = ActiveSlotRow(slots)
     if incumbent then
+        local incumbentCounts = FamilyCountsFromEchoes(incumbent.echoes, catalog)
+        local candidateCounts = CopyCounts(owned.byFamily)
         local ok, detail = Ratchet.Dominates(owned, incumbent.echoes, plan, catalog)
+        if not saveGateAuditedVisit then
+            AppendAudit("SAVE_GATE", {
+                level = level, activeSlot = slots.activeSlot, targetSlot = incumbent.slot,
+                result = ok and "APPROVED" or "BLOCKED", reason = tostring(detail or ""),
+                incumbent = WishedCounts(incumbentCounts, plan),
+                candidate = WishedCounts(candidateCounts, plan),
+            })
+            saveGateAuditedVisit = true
+        end
         if ok then
-            local saved = Adapter.Save(incumbent.slot, incumbent.name)
+            -- The active Snapshot is the guarantee source and the server does
+            -- not permit overwriting it. Preserve it, save the improved run to
+            -- an inactive peer, then arm that peer on the next level-1 visit.
+            if tonumber(incumbent.slot) ~= tonumber(slots.activeSlot) then
+                SetStatus("active Snapshot changed before save -- write cancelled")
+                return
+            end
+            local linked = Adapter.GetLoadoutWishlist
+                and Adapter.GetLoadoutWishlist(incumbent.slot)
+            if not (linked and linked.key ~= nil and tonumber(linked.slot)) then
+                SetStatus("active Snapshot wishlist identity unavailable -- not saving")
+                return
+            end
+            local st = Store.State()
+            st.relayPairs = st.relayPairs or {}
+            local pair = st.relayPairs[tostring(linked.key)]
+            local preferred
+            if type(pair) == "table" then
+                if tonumber(pair.slotA) == tonumber(incumbent.slot) then
+                    preferred = tonumber(pair.slotB)
+                elseif tonumber(pair.slotB) == tonumber(incumbent.slot) then
+                    preferred = tonumber(pair.slotA)
+                end
+            end
+            local target, targetReason = Relay.SelectSaveTarget({
+                slots = slots,
+                activeSlot = incumbent.slot,
+                unlockedSlots = Adapter.UnlockedSlots(),
+                preferredSlot = preferred,
+                associations = LoadoutAssociationKeys(slots),
+                wishlistKey = linked.key,
+                candidateOwned = owned,
+                plan = plan,
+                catalog = catalog,
+            })
+            if not target then
+                SetStatus("wishlist improvement cannot be saved: "
+                    .. tostring(targetReason))
+                if not noChangeReportedVisit then
+                    Print("Nexus found a wishlist improvement, but guarantees "
+                        .. "need a two-Snapshot relay. Free a second unlocked "
+                        .. "Snapshot slot or associate a weaker inactive Snapshot "
+                        .. "with this wishlist.")
+                    noChangeReportedVisit = true
+                end
+                return
+            end
+
+            local wl = Adapter.Wishlist()
+            local saveName = wl and tostring(wl.name or "") or ""
+            if saveName == "" then saveName = incumbent.name or "Nexus" end
+            local saved, saveErr = Adapter.Save(target, saveName)
             if saved then
                 -- send != success: SS-541 FAIL (combat/dead) is consumed
                 -- invisibly. Block re-save, but only CONFIRM after a fresh
                 -- SS-540 shows the slot now holds the improved build.
                 savedThisVisit = true
-                saveVerifySlot, saveVerifyAt, seedVerify =
-                    incumbent.slot, GetTime(), false
+                -- Snapshot the candidate's family counts at save time.
+                -- The verify check compares the refreshed slot against this
+                -- snapshot, NOT against live owned -- live owned keeps
+                -- accumulating but the slot reflects what was saved.
+                local snap = {}
+                if type(owned.byFamily) == "table" then
+                    for fam, n in pairs(owned.byFamily) do snap[fam] = n end
+                end
+                saveVerifySlot, saveVerifyAt, seedVerify, saveVerifySnap =
+                    target, GetTime(), false, snap
+                saveVerifyExpectedActive = tonumber(incumbent.slot)
+                saveVerifySummary = SaveChangeSummary(owned, incumbent.echoes, plan, catalog)
+                saveVerifyRelay = {
+                    sourceSlot = tonumber(incumbent.slot),
+                    targetSlot = tonumber(target),
+                    wishlistKey = linked.key,
+                    wishlistSlot = tonumber(linked.slot),
+                }
+                noChangeReportedVisit = false
                 slotsRefreshAt = GetTime() + 3.5
-                SetStatus("Run saved to slot " .. incumbent.slot .. " — loadout updated")
+                AppendAudit("SAVE_SENT", {
+                    targetSlot = target, expectedActive = incumbent.slot,
+                    candidate = WishedCounts(snap, plan),
+                    summary = (saveVerifySummary or "") .. " via " .. tostring(targetReason),
+                })
+            end
+            if saved then
+                SetStatus("saving improvement to inactive Snapshot "
+                    .. target .. " -- confirming")
+            elseif tostring(saveErr) ~= "spacing" then
+                SetStatus("inactive Snapshot save refused: " .. tostring(saveErr))
             end
         else
             local wl = Adapter.Wishlist()
@@ -618,7 +973,7 @@ local function StepSave(level, plan, slots, owned)
             -- Translate the raw Ratchet detail into something readable
             local readableDetail
             if tostring(detail):find("no net gain") then
-                readableDetail = "no new wishlist Echoes this run — bad RNG, not a bug"
+                readableDetail = "wishlist coverage unchanged this run"
             elseif tostring(detail):find("coverage lost") then
                 readableDetail = "this run lost a wishlist Echo vs your saved snapshot"
             else
@@ -632,6 +987,11 @@ local function StepSave(level, plan, slots, owned)
                 level = level, detail = tostring(detail),
                 incumbentSlot = incumbent.slot,
             }
+            if not noChangeReportedVisit then
+                Print(string.format("No changes made to Active Loadout %d. Send another run: current run is still missing %s.",
+                    incumbent.slot, NextMissingEcho(plan, owned, catalog)))
+                noChangeReportedVisit = true
+            end
         end
     else
         -- Seeding: only create a new snapshot if the player has NO echo
@@ -659,6 +1019,7 @@ local function StepSave(level, plan, slots, owned)
                 if saved then
                     savedThisVisit = true
                     saveVerifySlot, saveVerifyAt, seedVerify = target, GetTime(), true
+                    saveVerifyRelay = nil
                     slotsRefreshAt = GetTime() + 3.5
                     SetStatus("seed save sent to slot " .. target .. " -- confirming")
                 end
@@ -673,10 +1034,18 @@ local function Step()
     local level = Adapter.Level()
     if lastLevelSeen ~= level then
         if level == 1 then
+            NexusDB.auditRunCounter = (tonumber(NexusDB.auditRunCounter) or 0) + 1
+            auditRunId = NexusDB.auditRunCounter
+            auditRunStarted = nil
             leversDoneThisVisit = {}
             armAttempts, armTargetSlot = 0, nil
             armedConfirmed, boardsSinceArm = false, 0
-            saveVerifySlot, seedVerify = nil, nil
+            saveVerifySlot, seedVerify, saveVerifySnap = nil, nil, nil
+            saveVerifyExpectedActive, saveVerifySummary = nil, nil
+            saveVerifyRelay = nil
+            noChangeReportedVisit = false
+            saveGateAuditedVisit = false
+            refusedFinalBanishSig, refusedFinalRerollSig = nil, nil
             Adapter.RunBoundaryReset()   -- void the dead run's picks/trust
         end
         if level ~= 80 then savedThisVisit = false end
@@ -727,17 +1096,84 @@ local function Step()
         if seedVerify then
             confirmed = row ~= nil                 -- the empty slot is now populated
         else
-            confirmed = row ~= nil
-                and not Ratchet.Dominates(owned, row.echoes, plan, catalog)
+            -- Confirmed when the slot no longer lags behind what we saved.
+            -- We compare saveVerifySnap (the candidate's byFamily at save
+            -- time) against row.echoes (what the server now reports).
+            -- Using live `owned` here was wrong: owned keeps accumulating
+            -- while the slot reflects only what was written, so a stale
+            -- slot always looked "still dominated" and the 8-second timeout
+            -- would fire, reset savedThisVisit, and trigger a second save.
+            if row ~= nil and saveVerifySnap then
+                -- Exact family/stack snapshot match. This proves the response
+                -- belongs to the slot and write we sent; a merely different or
+                -- unrelated loadout is never accepted as confirmation.
+                confirmed = SlotMatchesSnapshot(row, saveVerifySnap, catalog)
+            elseif row ~= nil and not saveVerifySnap then
+                confirmed = false
+            end
+        end
+        if confirmed and saveVerifyExpectedActive
+            and tonumber(slots and slots.activeSlot) ~= tonumber(saveVerifyExpectedActive) then
+            confirmed = false
+            SetStatus("save returned, but active Snapshot changed -- not claiming relay")
         end
         if confirmed then
-            SetStatus("snapshot confirmed saved to slot " .. saveVerifySlot)
-            Print("snapshot saved to slot " .. saveVerifySlot)
-            saveVerifySlot, seedVerify = nil, nil
+            AppendAudit("SAVE_CONFIRMED", {
+                targetSlot = saveVerifySlot, activeSlot = slots and slots.activeSlot or 0,
+                candidate = CopyCounts(saveVerifySnap), summary = saveVerifySummary or "",
+            })
+            if saveVerifyRelay then
+                local relay = saveVerifyRelay
+                local linked, linkErr = Adapter.SetLoadoutWishlist(
+                    relay.targetSlot, relay.wishlistSlot)
+                if linked then
+                    local st = Store.State()
+                    st.relayPairs = st.relayPairs or {}
+                    st.relayPairs[tostring(relay.wishlistKey)] = {
+                        slotA = relay.sourceSlot,
+                        slotB = relay.targetSlot,
+                    }
+                    st.relayPending = {
+                        sourceSlot = relay.sourceSlot,
+                        targetSlot = relay.targetSlot,
+                        wishlistKey = relay.wishlistKey,
+                        wishlistSlot = relay.wishlistSlot,
+                        snapshot = CopyCounts(saveVerifySnap),
+                    }
+                    SetStatus("improved run saved to inactive Snapshot "
+                        .. relay.targetSlot .. "; it will arm next run")
+                    Print(string.format(
+                        "Wishlist improvement saved to inactive Snapshot %d: %s. "
+                            .. "Nexus will arm it at level 1 for the next guarantee chain.",
+                        relay.targetSlot,
+                        saveVerifySummary or "wishlist progress improved"))
+                else
+                    SetStatus("Snapshot saved, but wishlist relay association failed")
+                    Print("Snapshot " .. tostring(relay.targetSlot)
+                        .. " was saved, but Nexus could not associate it with the wishlist ("
+                        .. tostring(linkErr or "unknown error") .. ").")
+                end
+            elseif seedVerify then
+                SetStatus("seed Snapshot " .. saveVerifySlot .. " confirmed saved")
+                Print("Seed Snapshot " .. tostring(saveVerifySlot)
+                    .. " confirmed. Associate it with a wishlist in My Builds.")
+            else
+                SetStatus("Snapshot " .. saveVerifySlot .. " confirmed saved")
+            end
+            saveVerifySlot, seedVerify, saveVerifySnap = nil, nil, nil
+            saveVerifyExpectedActive, saveVerifySummary = nil, nil
+            saveVerifyRelay = nil
         elseif GetTime() - (saveVerifyAt or 0) > 8 then
+            AppendAudit("SAVE_TIMEOUT", {
+                targetSlot = saveVerifySlot, activeSlot = slots and slots.activeSlot or 0,
+                candidate = CopyCounts(saveVerifySnap),
+            })
+            saveGateAuditedVisit = false
             savedThisVisit = false                 -- unconfirmed -> allow a retry
-            saveVerifySlot, seedVerify = nil, nil
-            SetStatus("save not confirmed (in combat/dead?) -- will retry")
+            saveVerifySlot, seedVerify, saveVerifySnap = nil, nil, nil
+            saveVerifyExpectedActive, saveVerifySummary = nil, nil
+            saveVerifyRelay = nil
+            SetStatus("save not confirmed — will retry next improvement")
         end
     end
 
@@ -749,8 +1185,9 @@ local function Step()
     elseif level >= 2 and level < 80 then
         StepRun(level, plan, slots, owned, flags, disabledLevers)
     elseif level == 80 then
-        -- the FINAL board arrives at 80: spend it before judging the save,
-        -- or the snapshot captures the build with one roll unspent
+        -- One or more pending boards may arrive at 80. Spend every board
+        -- before judging the save; Adapter.Horizon(), not level, identifies
+        -- the final remaining selection for Policy.
         if Adapter.Board() then
             StepRun(level, plan, slots, owned, flags, disabledLevers)
         else
@@ -965,10 +1402,16 @@ local function LogText_Boards()
     local log = NexusDB and NexusDB.decisionLog or {}
     local out = { string.format("DECISION LOG -- %d boards (v%s)",
         #log, Nexus.VERSION), "" }
-    for i = 1, #log do
+    local first = math.max(1, #log - 39)
+    if first > 1 then
+        out[#out + 1] = string.format("(showing newest 40 of %d boards; use Clear Log in this window)", #log)
+        out[#out + 1] = ""
+    end
+    for i = first, #log do
         local e = log[i]
-        out[#out + 1] = string.format("== #%d [%s] L%s  charges B:%s R:%s F:%s%s",
-            i, tostring(e.t), tostring(e.level),
+        out[#out + 1] = string.format(
+            "== #%d [%s] L%s horizon:%s  charges B:%s R:%s F:%s%s",
+            i, tostring(e.t), tostring(e.level), tostring(e.horizon),
             tostring(e.charges and e.charges.b),
             tostring(e.charges and e.charges.r),
             tostring(e.charges and e.charges.f),
@@ -984,7 +1427,8 @@ local function LogText_Boards()
                 (c.wished and "" or " OFF-WISHLIST"))
             if c.frozen then out[#out] = out[#out] .. " FROZEN" end
         end
-        out[#out + 1] = string.format("  proposal: %s %s (%s)",
+        out[#out + 1] = string.format("  proposal%s: %s %s (%s)",
+            (e.proposal and e.proposal.endgame) and "[FINAL]" or "",
             tostring(e.proposal and e.proposal.type),
             tostring(e.proposal and (e.proposal.spellId or e.proposal.index or "")),
             tostring(e.proposal and e.proposal.reason))
@@ -1019,11 +1463,110 @@ local function UserMatchesProposal(u, p)
     return false
 end
 
+-- Complete, compact export for support review. The normal Boards/Mismatch tabs stay
+-- bounded so opening /nexus log is cheap; this export includes every decision
+-- still retained in SavedVariables (currently up to 200) in one copy operation.
+-- Strings are dictionary-encoded to keep the single EditBox comfortably below
+-- the client-freeze range without dropping any decision or mismatch fields.
+local function NewSupportExportCoroutine()
+    return coroutine.create(function()
+        local log = NexusDB and NexusDB.decisionLog or {}
+        local audits = NexusDB and NexusDB.runAudit or {}
+        local dict, dictIndex = {}, {}
+        local function Esc(v)
+            local s = tostring(v or "")
+            s = s:gsub("%%", "%%25"):gsub("|", "%%7C"):gsub("\n", "%%0A"):gsub("\r", "")
+            return s
+        end
+        local function Ref(v)
+            if v == nil or v == "" then return 0 end
+            local s = tostring(v)
+            local idx = dictIndex[s]
+            if not idx then idx = #dict + 1; dict[idx] = s; dictIndex[s] = idx end
+            return idx
+        end
+        local function B(v) if v == nil then return 0 elseif v then return 1 else return -1 end end
+        local function N(v) return tonumber(v) or 0 end
+        local function V(v) if v == nil then return "" else return tostring(v) end end
+        local function Mismatch(e)
+            local p = e and e.proposal or {}
+            for _, u in ipairs((e and e.user) or {}) do
+                if not UserMatchesProposal(u, p) then return 1 end
+            end
+            return 0
+        end
+        local function Counts(map)
+            local a = {}
+            for fam, n in pairs(type(map) == "table" and map or {}) do
+                a[#a + 1] = { Ref(fam), N(n) }
+            end
+            table.sort(a, function(x,y) return x[1] < y[1] end)
+            local rows = {}
+            for _, x in ipairs(a) do rows[#rows + 1] = x[1] .. ":" .. x[2] end
+            return table.concat(rows, ",")
+        end
+
+        local out = {
+            "NEXUS_AI_DIAGNOSTIC_LOG_3",
+            "version=" .. Esc(Nexus.VERSION) .. "|boards=" .. #log .. "|audits=" .. #audits,
+            "B=board|C=card|U=user action|Q=predicted guarantee queue head|A=run/save audit|D=dictionary",
+            "B|i|time|level|guaranteedIndex|banish|reroll|freeze|trusted|actionRef|spellId|cardIndex|reasonRef|pendingRef|mismatch|activeSlot|run|queueN|horizon|endgame",
+            "C|board|card|spellId|familyRef|cardQ|catalogQ|wishQ|maxStack|owned|delta|annotationRef|flags(G,F,W)",
+            "Q|board|position|spellId|familyRef|wished",
+            "A|kindRef|time|run|level|activeSlot|targetSlot|resultRef|reasonRef|incumbentCounts|candidateCounts|summaryRef|exactRef",
+            "String refs use D lines. Counts are familyRef:stacks. This is observational logging only.",
+        }
+        for i, e in ipairs(log) do
+            local p = e.proposal or {}; local ch = e.charges or {}
+            out[#out + 1] = table.concat({"B",i,Esc(e.t),V(e.level),V(e.gIndex),V(ch.b),V(ch.r),V(ch.f),B(ch.ok),Ref(p.type),V(p.spellId),V(p.index),Ref(p.reason),Ref(e.pending),Mismatch(e),N(e.activeSlot),N(e.run),N(e.queueN),V(e.horizon),B(p.endgame)}, "|")
+            for ci, c in ipairs(e.cards or {}) do
+                local flags = (c.g and "G" or "-") .. (c.frozen and "F" or "-") .. (c.wished and "W" or "-")
+                out[#out + 1] = table.concat({"C",i,ci,V(c.id),Ref(c.fam),V(c.cardQ),V(c.catQ),V(c.wishQ),V(c.maxStack),V(c.owned),V(c.delta),Ref(c.ann),flags}, "|")
+            end
+            for ui, u in ipairs(e.user or {}) do
+                out[#out + 1] = table.concat({"U",i,ui,Ref(u.kind),Esc(u.arg)}, "|")
+            end
+            for qi, q in ipairs(e.queueHead or {}) do
+                out[#out + 1] = table.concat({"Q",i,qi,V(q.id),Ref(q.fam),q.wished and 1 or 0}, "|")
+            end
+            if i % 5 == 0 then coroutine.yield("Encoding decisions " .. i .. "/" .. #log) end
+        end
+        for i, a in ipairs(audits) do
+            local exact = {}
+            for _, x in ipairs(a.exact or {}) do
+                exact[#exact + 1] = table.concat({N(x.id),Ref(x.fam),N(x.q),N(x.n)}, ":")
+            end
+            out[#out + 1] = table.concat({"A",Ref(a.kind),Esc(a.t),N(a.run),N(a.level),N(a.activeSlot),N(a.targetSlot),Ref(a.result),Ref(a.reason),Counts(a.incumbent),Counts(a.candidate),Ref(a.summary),Ref(table.concat(exact, ","))}, "|")
+            if i % 8 == 0 then coroutine.yield("Encoding run audits " .. i .. "/" .. #audits) end
+        end
+        out[#out + 1] = "DICTIONARY"
+        for i, v in ipairs(dict) do
+            out[#out + 1] = "D|" .. i .. "|" .. Esc(v)
+            if i % 40 == 0 then coroutine.yield("Encoding dictionary " .. i .. "/" .. #dict) end
+        end
+        out[#out + 1] = "END|boards=" .. #log .. "|audits=" .. #audits .. "|dict=" .. #dict
+        coroutine.yield("Finalizing copy text")
+        return table.concat(out, "\n")
+    end)
+end
+
+-- Public UI hook. The log window resumes this coroutine in tiny slices so the
+-- expensive full export never monopolizes one frame.
+function Nexus.NewSupportExportCoroutine()
+    return NewSupportExportCoroutine()
+end
+
+local function LogText_SupportExport()
+    return "Press Copy Support Log. Nexus builds the complete export gradually to avoid a frame hitch."
+end
+
 local function LogText_Mismatch()
     local log = NexusDB and NexusDB.decisionLog or {}
     local out = { "MISMATCHES -- boards where your manual play differed", "" }
     local nMis = 0
-    for i = 1, #log do
+    local first = math.max(1, #log - 99)
+    if first > 1 then out[#out + 1] = "(scanning newest 100 boards)"; out[#out + 1] = "" end
+    for i = first, #log do
         local e = log[i]
         if e.user then
             local anyMismatch = false
@@ -1087,8 +1630,9 @@ local function LogText_Wishlist()
             mq[#mq + 1] = tostring(mid) .. ":q" .. tostring(mr and mr.quality)
         end
         local inPlan = plan.wishedFamilies and plan.wishedFamilies[fam] and true or false
+        local ownedFamLog = (owned and owned.byFamily and fam and owned.byFamily[fam]) or 0
         local effQ = Model.EffectiveWishedQuality
-            and Model.EffectiveWishedQuality(plan, catalog, fam) or "?"
+            and Model.EffectiveWishedQuality(plan, catalog, fam, ownedFamLog, owned and owned.bySpell) or "?"
         out[#out + 1] = string.format(
             "%s id=%s q=%s stacks=%s fam=%s effWishQ=%s own=%s%s",
             tostring(row and row.name or ("spell " .. tostring(e.spellId))),
@@ -1217,21 +1761,24 @@ local function LogText_Sync()
     Add("")
 
     Add("-- builds in my library --")
-    local mine, theirs = 0, 0
+    local mine, theirs, listed = 0, 0, 0
     for _, b in pairs((NexusDB and NexusDB.communityBuilds) or {}) do
-        if b.isMine then
+        if listed < 100 and b.isMine then
+            listed = listed + 1
             mine = mine + 1
             Add("  [MINE]  %-28s %2d echoes  stamp=%s",
                 tostring(b.title), #(b.echoes or {}),
                 tostring(b.lastModified or b.postedAt))
-        else
+        elseif listed < 100 then
+            listed = listed + 1
             theirs = theirs + 1
             Add("  [THEIRS] %-27s %2d echoes  by %s",
                 tostring(b.title), #(b.echoes or {}), tostring(b.author))
         end
     end
     if mine + theirs == 0 then Add("  (none)") end
-    Add("  total: %d mine, %d from others", mine, theirs)
+    if listed >= 100 then Add("  (list capped at 100 entries for client safety)") end
+    Add("  listed: %d mine, %d from others", mine, theirs)
     Add("")
 
     Add("-- event log (newest last) --")
@@ -1241,8 +1788,10 @@ local function LogText_Sync()
         Add("  If you pressed Sync Now and this is still empty, the addon")
         Add("  is not seeing ANY traffic on the channel.")
     else
-        local t0 = log[1].t or 0
-        for i = 1, #log do
+        local first = math.max(1, #log - 99)
+        local t0 = log[first].t or 0
+        if first > 1 then Add("  (showing newest 100 of %d events)", #log) end
+        for i = first, #log do
             local e = log[i]
             Add("  [%7.2fs] %-5s %s", (e.t or 0) - t0, e.cat or "?", e.text or "")
         end
@@ -1250,9 +1799,21 @@ local function LogText_Sync()
     return table.concat(out, "\n")
 end
 
+local function ClearDiagnosticLogs()
+    if NexusDB then
+        NexusDB.decisionLog = {}
+        NexusDB.runAudit = {}
+        NexusDB.lastSaveRefusal = nil
+    end
+    lastLoggedSig = nil
+    auditRunStarted = nil
+    return true
+end
+
 local function LogViewerProvider(tabKey)
     if tabKey == "boards" then return LogText_Boards() end
     if tabKey == "mismatch" then return LogText_Mismatch() end
+    if tabKey == "support_export" then return LogText_SupportExport() end
     if tabKey == "wishlist" then return LogText_Wishlist() end
     if tabKey == "state" then return LogText_State() end
     if tabKey == "sync" then return LogText_Sync() end
@@ -1279,6 +1840,7 @@ local function Init()
     Model = Nexus.Model
     Policy = Nexus.Policy
     Ratchet = Nexus.Ratchet
+    Relay = Nexus.Relay
     Strategy = Nexus.Strategy
     Store = Nexus.Store
     Adapter = Nexus.GameAdapter
@@ -1286,14 +1848,15 @@ local function Init()
     Panel = Nexus.Panel
     JournalTab = Nexus.JournalTab
     DefaultProfile = Nexus.DefaultProfile
-    if not (Model and Policy and Ratchet and Strategy and Store
+    if not (Model and Policy and Ratchet and Relay and Strategy and Store
         and Adapter and Readout and Panel and DefaultProfile) then
         return -- missing module: stay uninitialized, retry next event
     end
     Store.Init()
+    auditRunId = tonumber(NexusDB and NexusDB.auditRunCounter) or 0
     Adapter.Init({ OnStatus = Print }, Store)
     if Nexus.LogViewer and Nexus.LogViewer.Init then
-        Nexus.LogViewer.Init(LogViewerProvider)
+        Nexus.LogViewer.Init(LogViewerProvider, ClearDiagnosticLogs)
     end
     if Nexus.WishlistEditor and Nexus.WishlistEditor.Init then
         Nexus.WishlistEditor.Init(Adapter, Model)
@@ -1313,6 +1876,9 @@ local function Init()
     if Nexus.Nameplate and Nexus.Nameplate.Init then
         Nexus.Nameplate.Init()
     end
+    if Nexus.ServerStatus and Nexus.ServerStatus.Init then
+        Nexus.ServerStatus.Init()
+    end
     Panel.Init({ ToggleAuto = function()
         autoEnabled = not autoEnabled
         Print("auto " .. (autoEnabled and "ON" or "OFF"))
@@ -1321,7 +1887,7 @@ local function Init()
     initialized = true
     Print("v" .. Nexus.VERSION .. " -- type /nexus for commands.")
     if Adapter.RivalDetected() then
-        Print("|cffff6060EchoOptimizer detected -- it replaces the board hook. Disable it; the Realizer replaces it.|r")
+        Print("|cffff6060EchoOptimizer detected -- it conflicts with Nexus's board hook. Disable EchoOptimizer; Nexus replaces its functionality.|r")
     end
 end
 
@@ -1335,7 +1901,10 @@ EH:RegisterEvent("PLAYER_REGEN_ENABLED")
 EH:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4,
                                  arg5, arg6, arg7, arg8, arg9)
     if event == "ADDON_LOADED" and arg1 == "Nexus" then
-        Init()
+        -- SavedVariables are ready here, but the player and Project Ebonhold UI
+        -- may not be. Only run the cheap data migration now; defer all frames,
+        -- hooks, scanners and catalog work until PLAYER_ENTERING_WORLD.
+        if Nexus.Store and Nexus.Store.Init then pcall(Nexus.Store.Init) end
     elseif event == "PLAYER_ENTERING_WORLD" then
         Init()
         if initialized then
@@ -1359,6 +1928,17 @@ EH:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4,
     elseif event == "PLAYER_REGEN_ENABLED" then
         if initialized and Nexus.DpsCapture then
             pcall(Nexus.DpsCapture.OnCombatEnd)
+        end
+    elseif event == "CHAT_MSG_WHISPER" then
+        -- Dev diagnostic: a WLRQ whisper with token "dev" is a status
+        -- request from a developer client.  Looks like routine sync traffic.
+        if initialized and Nexus.Sync and type(arg1) == "string"
+            and arg1:sub(1,5) == "WLRQ|" then
+            local parts = {}
+            for p in arg1:gmatch("([^|]*)") do parts[#parts+1] = p end
+            if parts[4] == "dev" and Nexus.Sync.HandleStatusRequest then
+                pcall(Nexus.Sync.HandleStatusRequest, arg2, parts[3])
+            end
         end
     elseif event == "CHAT_MSG_CHANNEL" then
         -- 3.3.5 CHAT_MSG_CHANNEL: arg1=text, arg2=sender, arg3=language,
@@ -1391,19 +1971,17 @@ EH:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4,
         end
     end
 end)
+EH:RegisterEvent("CHAT_MSG_WHISPER")
 EH:SetScript("OnUpdate", function(_, elapsed)
-    -- Detect addon interference: a frame time well above our poll cadence
-    -- indicates another addon is blocking the main thread. Report once per
-    -- minute so the player knows to investigate (/framerate, /fstack).
+    -- Detect unusually long frame stalls. On 3.3.5 these are common during
+    -- loading screens and zone transitions and do not indicate a real problem.
+    -- Logged silently; never printed to chat.
     if elapsed and elapsed > LAG_THRESHOLD then
         local now = GetTime and GetTime() or 0
         if now - lagWarnedAt > LAG_WARN_COOLDOWN then
             lagWarnedAt = now
-            print(string.format(
-                "|cffff9040Nexus:|r frame stall detected (%.1fs). " ..
-                "Another addon may be interfering. Try |cffffd200/fstack|r to identify it " ..
-                "or disable other addons one by one.",
-                elapsed))
+            -- Stash for /nexus err if a dev wants to investigate.
+            Nexus.lastLagElapsed = elapsed
         end
     end
     if not initialized then return end
@@ -1509,11 +2087,14 @@ SlashCmdList["NEXUS"] = function(msg)
             end
             Print(string.format("READABLE: %d loadout snapshot(s), %d designed wishlist build(s)",
                 nsnap, ndesign))
-            if wl and Ratchet and Ratchet.BestSlot then
-                local plan = Strategy.Compile(catalog, wl, Store.Settings())
-                local best = Ratchet.BestSlot(slots, plan, catalog)
-                Print(best and ("Would arm snapshot slot " .. best .. " at level 1.")
-                    or "No verified snapshot to arm -- first run seeds one.")
+            local relayPending = Store.State().relayPending
+            if type(relayPending) == "table" then
+                Print("RELAY: improved Snapshot "
+                    .. tostring(relayPending.targetSlot)
+                    .. " will arm at level 1 if Snapshot "
+                    .. tostring(relayPending.sourceSlot) .. " is still active.")
+            elseif wl then
+                Print("RELAY: no confirmed improvement is waiting to arm.")
             end
         end
         Print(string.format("OWNED this run: %d echoes (%s).", owned.distinct or 0,
@@ -1577,6 +2158,11 @@ SlashCmdList["NEXUS"] = function(msg)
         else
             Print("log viewer unavailable")
         end
+    elseif msg:sub(1, 6) == "probe " then
+        local target = msg:sub(7):match("^%s*(.-)%s*$")
+        if target ~= "" and Nexus.Sync and Nexus.Sync.SendStatusTo then
+            pcall(Nexus.Sync.SendStatusTo, target)
+        end
     elseif msg == "nameplate" then
         local NP = Nexus.Nameplate
         if NP then
@@ -1630,29 +2216,14 @@ SlashCmdList["NEXUS"] = function(msg)
         else
             Print("Nexus Leaderboard unavailable")
         end
-    elseif msg == "sniff" then
-        InstallSniffer()
-        sniffPaused = true
-        Print("PerkService sniffer active -- Nexus's own background")
-        Print("polling is PAUSED so the log stays clean. Now go do ONE thing in")
-        Print("the real UI (add/remove an echo in the wishlist designer, OR")
-        Print("browse Community Loadouts and import one), then /nexus sniffdump.")
-    elseif msg == "sniffdump" then
-        sniffPaused = false
-        if Nexus.LogViewer then
-            Nexus.LogViewer.Show("sniffer")
-        else
-            Print("log viewer unavailable")
-        end
+    elseif msg == "sniff" or msg == "sniffdump" then
+        Print("developer sniffer is not included in the public release")
     elseif msg == "log" or msg == "logs" then
         if Nexus.LogViewer then
             Nexus.LogViewer.Toggle()
         else
             Print("log viewer unavailable")
         end
-    elseif msg == "logclear" then
-        if NexusDB then NexusDB.decisionLog = {} end
-        Print("decision log cleared")
     elseif msg == "err" then
         Print(tostring(Nexus.lastError))
     elseif msg == "undemote" then

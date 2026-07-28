@@ -414,9 +414,36 @@ local function EchoesToWishlist(echoes, name, source, echoHasQuality, slot)
             entries[#entries + 1] = { spellId = id, quality = q,
                                       stacks = stacks, family = fam }
             local t = byFamily[fam]
-            if not t or stacks > t.targetStacks then
-                byFamily[fam] = { targetStacks = stacks, wishedQuality = q, spellId = id }
+            if not t then
+                byFamily[fam] = {
+                    targetStacks  = stacks,
+                    wishedQuality = q,
+                    spellId       = id,
+                    qualityTiers  = { { q = q, n = stacks, spellId = id } },
+                }
+            else
+                t.targetStacks = t.targetStacks + stacks
+                if q < t.wishedQuality then t.wishedQuality = q end
+                local found = false
+                for _, tier in ipairs(t.qualityTiers) do
+                    if tier.q == q then
+                        tier.n = tier.n + stacks
+                        -- keep the spellId of this tier (first encountered wins;
+                        -- all same-quality variants map to the same tier)
+                        found = true
+                        break
+                    end
+                end
+                if not found then
+                    t.qualityTiers[#t.qualityTiers + 1] = { q = q, n = stacks, spellId = id }
+                end
             end
+        end
+    end
+    -- Sort tiers ascending so callers walk low→high.
+    for _, t in pairs(byFamily) do
+        if t.qualityTiers and #t.qualityTiers > 1 then
+            table.sort(t.qualityTiers, function(a, b) return a.q < b.q end)
         end
     end
     if #entries == 0 then return nil end
@@ -434,36 +461,210 @@ end
 --   2. the designed "Echo Wishlist" build -- the active one if a designed
 --      build is active, else the sole designed build; ambiguous only when
 --      several exist with none active.
-function A.Wishlist()
-    A._wishlistNote = nil
+local function WishlistIdentity(echoes)
+    if type(echoes) ~= "table" then return nil end
+    local parts = {}
+    for i = 1, #echoes do
+        local e = echoes[i]
+        local id = type(e) == "table" and tonumber(e.spellId)
+        if id then
+            parts[#parts + 1] = tostring(id) .. ":" .. tostring(math.max(1, tonumber(e.stacks) or 1))
+        end
+    end
+    if #parts == 0 then return nil end
+    table.sort(parts)
+    return table.concat(parts, ",")
+end
 
-    -- Activating a designed wishlist is asynchronous: the client can keep
-    -- returning the previous active slot until the next SS-540 refresh.
-    -- Preserve the user's explicit selection optimistically so every panel
-    -- render switches immediately, then clear it once the server confirms
-    -- (or after a short timeout if activation was refused server-side).
-    local now = (GetTime and GetTime()) or 0
-    if A._pendingWishlistSlot and A._pendingWishlistAt
-        and (now - A._pendingWishlistAt) > 10 then
-        A._pendingWishlistSlot, A._pendingWishlistAt = nil, nil
+function A.GetWishlistCandidates()
+    local slots = A.Slots()
+    if not slots then return {} end
+    local maxSlots = slots.maxSlots or 5
+    local out = {}
+    for slotId, row in pairs(slots.bySlot or {}) do
+        local isDesigned = (row.verified == false)
+            or (type(row.slot) == "number" and row.slot > maxSlots)
+        if isDesigned and type(row.echoes) == "table" and #row.echoes > 0 then
+            local echoes = {}
+            for i = 1, #row.echoes do
+                local e = row.echoes[i]
+                echoes[#echoes + 1] = {
+                    spellId = tonumber(e.spellId),
+                    quality = tonumber(e.quality) or 0,
+                    stacks = math.max(1, tonumber(e.stacks) or 1),
+                }
+            end
+            out[#out + 1] = {
+                slot = tonumber(slotId) or tonumber(row.slot),
+                name = tostring(row.name or ""), count = #echoes,
+                echoes = echoes, key = WishlistIdentity(echoes), active = false,
+            }
+        end
+    end
+    table.sort(out, function(a, b) return (tonumber(a.slot) or 0) < (tonumber(b.slot) or 0) end)
+    return out
+end
+
+local function ResolveAssociation(loadoutSlot)
+    loadoutSlot = tonumber(loadoutSlot)
+    if not loadoutSlot then return nil end
+    local state = Store and Store.State and Store.State()
+    local links = state and state.loadoutWishlists
+    local saved = links and links[loadoutSlot]
+    if saved == nil then return nil end
+
+    -- 1.0.5 stored a bare designed-slot number. Migrate it only after
+    -- validating the current contents, then persist a content identity so a
+    -- recycled server slot can never resurrect an unrelated historical name.
+    if type(saved) == "number" or type(saved) == "string" then
+        local wanted = tonumber(saved)
+        for _, c in ipairs(A.GetWishlistCandidates()) do
+            if tonumber(c.slot) == wanted then
+                links[loadoutSlot] = { slot = c.slot, key = c.key, name = c.name }
+                return c
+            end
+        end
+        links[loadoutSlot] = nil
+        return nil
+    end
+    if type(saved) ~= "table" then
+        links[loadoutSlot] = nil
+        return nil
     end
 
-    -- The modern Echo Wishlist UI stores the user's current target in the
-    -- active designed server slot. Prefer that FIRST. The legacy
-    -- GetActiveEchoLoadout() getter can still contain an older persisted
-    -- wishlist and must not override the currently selected Echo Wishlist.
+    local candidates = A.GetWishlistCandidates()
+    local wantedKey = saved.key
+    if wantedKey and wantedKey ~= "" then
+        for _, c in ipairs(candidates) do
+            if c.key == wantedKey then
+                -- Keep the current server slot/name synchronized after slot
+                -- reordering while the Echo identity remains stable.
+                saved.slot, saved.name = c.slot, c.name
+                return c
+            end
+        end
+        -- A wishlist edited in place legitimately changes its Echo identity.
+        -- Preserve the association only when BOTH its designed slot and name
+        -- still match. A recycled/deleted slot with a different name is not
+        -- accepted, preventing historical names from resurfacing.
+        local oldSlot, oldName = tonumber(saved.slot), tostring(saved.name or "")
+        if oldSlot and oldName ~= "" then
+            for _, c in ipairs(candidates) do
+                if tonumber(c.slot) == oldSlot and tostring(c.name or "") == oldName then
+                    saved.key = c.key
+                    return c
+                end
+            end
+        end
+    end
+    -- No key means an incomplete/old record. Slot fallback is accepted once
+    -- only and upgraded immediately.
+    local wantedSlot = tonumber(saved.slot)
+    if not wantedKey and wantedSlot then
+        for _, c in ipairs(candidates) do
+            if tonumber(c.slot) == wantedSlot then
+                saved.key, saved.name = c.key, c.name
+                return c
+            end
+        end
+    end
+    links[loadoutSlot] = nil
+    return nil
+end
+
+local function IsPopulatedLoadout(loadoutSlot, slots)
+    loadoutSlot = tonumber(loadoutSlot)
+    slots = slots or A.Slots()
+    local row = slots and slots.bySlot and loadoutSlot and slots.bySlot[loadoutSlot]
+    return row and type(row.echoes) == "table" and #row.echoes > 0 and true or false
+end
+
+function A.GetLoadoutWishlist(loadoutSlot)
+    -- An association on an empty numbered slot is stale metadata, not a usable
+    -- build. Never expose it to the panel/UI as though the player can swap to it.
+    if not IsPopulatedLoadout(loadoutSlot) then return nil end
+    return ResolveAssociation(loadoutSlot)
+end
+
+function A.GetLoadoutWishlistSlot(loadoutSlot)
+    local c = A.GetLoadoutWishlist(loadoutSlot)
+    return c and tonumber(c.slot) or nil
+end
+
+function A.SetLoadoutWishlist(loadoutSlot, wishlistSlot)
+    loadoutSlot, wishlistSlot = tonumber(loadoutSlot), tonumber(wishlistSlot)
+    local slots = A.Slots()
+    if not slots or not loadoutSlot or loadoutSlot < 1
+        or loadoutSlot > (tonumber(slots.maxSlots) or 5) then
+        return false, "invalid loadout"
+    end
+    -- The server's populated echo list is the reliable proof that this is a
+    -- real saved loadout. Optional verification fields are missing on some
+    -- Ebonhold responses and previously made valid rows impossible to assign.
+    if not IsPopulatedLoadout(loadoutSlot, slots) then
+        return false, "that loadout slot is empty or unavailable"
+    end
+    local selected
+    for _, c in ipairs(A.GetWishlistCandidates()) do
+        if tonumber(c.slot) == wishlistSlot then selected = c; break end
+    end
+    if not selected then return false, "invalid wishlist" end
+    local state = Store and Store.State and Store.State()
+    if not state then return false, "store unavailable" end
+    state.loadoutWishlists = state.loadoutWishlists or {}
+    state.loadoutWishlists[loadoutSlot] = {
+        slot = selected.slot, key = selected.key, name = selected.name,
+    }
+    dataDirty = true
+    return true
+end
+
+function A.ClearLoadoutWishlist(loadoutSlot)
+    loadoutSlot = tonumber(loadoutSlot)
+    local state = Store and Store.State and Store.State()
+    if not state or not loadoutSlot then return false end
+    state.loadoutWishlists = state.loadoutWishlists or {}
+    state.loadoutWishlists[loadoutSlot] = nil
+    dataDirty = true
+    return true
+end
+
+function A.Wishlist()
+    A._wishlistNote = nil
     local slots = A.Slots()
     if slots then
-        local maxSlots = slots.maxSlots or 5
+        local activeSlot = tonumber(slots.activeSlot) or 0
+        local maxSlots = tonumber(slots.maxSlots) or 5
 
+        -- A saved Snapshot-specific association is the strongest target:
+        -- it ties the wishlist to the Snapshot that actually supplies the
+        -- guarantee. This is what makes the two-Snapshot relay deterministic.
+        if activeSlot >= 1 and activeSlot <= maxSlots then
+            local linked = ResolveAssociation(activeSlot)
+            if linked then
+                return EchoesToWishlist(linked.echoes, linked.name,
+                    "loadout-association", false, linked.slot)
+            end
+            A._wishlistNote = "Loadout " .. tostring(activeSlot)
+                .. " has no wishlist association; using the active designed wishlist."
+        end
+
+        -- Designed-wishlist activation is asynchronous. Preserve an explicit
+        -- designed selection until the next server slot refresh confirms it.
+        local now = (GetTime and GetTime()) or 0
+        if A._pendingWishlistSlot and A._pendingWishlistAt
+            and (now - A._pendingWishlistAt) > 10 then
+            A._pendingWishlistSlot, A._pendingWishlistAt = nil, nil
+        end
         if A._pendingWishlistSlot then
-            if slots.activeSlot == A._pendingWishlistSlot then
+            if activeSlot == A._pendingWishlistSlot then
                 A._pendingWishlistSlot, A._pendingWishlistAt = nil, nil
             else
                 local pending = slots.bySlot[A._pendingWishlistSlot]
                 local pendingDesigned = pending and (
                     pending.verified == false
-                    or (type(pending.slot) == "number" and pending.slot > maxSlots)
+                    or (type(pending.slot) == "number"
+                        and pending.slot > maxSlots)
                 )
                 if pendingDesigned and type(pending.echoes) == "table"
                     and #pending.echoes > 0 then
@@ -473,80 +674,73 @@ function A.Wishlist()
             end
         end
 
-        local active = slots.activeSlot ~= 0 and slots.bySlot[slots.activeSlot]
+        local active = activeSlot ~= 0 and slots.bySlot[activeSlot]
         local activeDesigned = active and (
             active.verified == false
             or (type(active.slot) == "number" and active.slot > maxSlots)
         )
         if activeDesigned and type(active.echoes) == "table"
             and #active.echoes > 0 then
-            return EchoesToWishlist(active.echoes, active.name, "designed", false, active.slot)
+            return EchoesToWishlist(active.echoes, active.name,
+                "designed", false, active.slot)
         end
 
-        -- If there is no active designed slot, retain the legacy fallback.
-        -- This supports older clients/builds that genuinely use the native
-        -- ActiveEchoLoadout store.
         local designed = {}
-        for _, s in pairs(slots.bySlot) do
-            local isDesigned = (s.verified == false)
-                or (type(s.slot) == "number" and s.slot > maxSlots)
-            if isDesigned and type(s.echoes) == "table" and #s.echoes > 0 then
-                designed[#designed + 1] = s
+        for _, row in pairs(slots.bySlot or {}) do
+            local isDesigned = row.verified == false
+                or (type(row.slot) == "number" and row.slot > maxSlots)
+            if isDesigned and type(row.echoes) == "table"
+                and #row.echoes > 0 then
+                designed[#designed + 1] = row
             end
         end
-
         if #designed == 1 then
-            return EchoesToWishlist(designed[1].echoes,
-                designed[1].name, "designed", false, designed[1].slot)
+            return EchoesToWishlist(designed[1].echoes, designed[1].name,
+                "designed", false, designed[1].slot)
         elseif #designed > 1 then
-            A._wishlistNote =
-                "several Echo Wishlist builds found -- click the one you want to make it active"
+            A._wishlistNote = "Several Echo Wishlist builds were found; "
+                .. "activate one or associate it with the active Snapshot."
             return nil
         end
     end
 
-    -- Legacy native active loadout fallback.
+    -- Legacy clients can still expose an explicit active Echo loadout.
     local svc = PS()
-    local wl = svc and SafeCall(svc.GetActiveEchoLoadout)
-    if type(wl) == "table" and type(wl.echoes) == "table"
-        and #wl.echoes > 0 then
-        return EchoesToWishlist(wl.echoes, wl.name, "active", true)
+    local legacy = svc and SafeCall(svc.GetActiveEchoLoadout)
+    if type(legacy) == "table" and type(legacy.echoes) == "table"
+        and #legacy.echoes > 0 then
+        return EchoesToWishlist(legacy.echoes, legacy.name,
+            "active", true)
     end
 
+    A._wishlistNote = A._wishlistNote
+        or "No wishlist is available. Select one in the Echo Journal."
     return nil
 end
 
 function A.WishlistNote() return A._wishlistNote end
 
--- The candidate designed (wishlist-shaped) build slots -- same detection
--- Wishlist() uses internally, exposed so the UI can show a real picker
--- when there's more than one and none is marked active, instead of
--- silently reporting "no wishlist" (2026-07-24: this is exactly what
--- happened when a community-loadout import and a raw-string import both
--- landed as separate designed slots with neither made active).
-function A.GetWishlistCandidates()
+function A.GetLoadoutCandidates()
     local slots = A.Slots()
     if not slots then return {} end
-    local maxSlots = slots.maxSlots or 5
     local out = {}
-    for slotId, s in pairs(slots.bySlot) do
-        local isDesigned = (s.verified == false)
-            or (type(s.slot) == "number" and s.slot > maxSlots)
-        if isDesigned and type(s.echoes) == "table" and #s.echoes > 0 then
-            local echoes = {}
-            for i = 1, #s.echoes do
-                local e = s.echoes[i]
-                echoes[#echoes + 1] = {
-                    spellId = tonumber(e.spellId),
-                    quality = tonumber(e.quality) or 0,
-                    stacks = math.max(1, tonumber(e.stacks) or 1),
-                }
-            end
-            out[#out + 1] = { slot = slotId, name = s.name, count = #s.echoes,
-                echoes = echoes, active = (slotId == slots.activeSlot) }
+    local maxSlots = tonumber(slots.maxSlots) or 5
+    for slot = 1, maxSlots do
+        local row = slots.bySlot and slots.bySlot[slot]
+        -- Only populated server loadouts are real switch targets. A stale
+        -- association on an empty slot must never make Nexus present it as one.
+        if IsPopulatedLoadout(slot, slots) then
+            local linked = ResolveAssociation(slot)
+            out[#out + 1] = {
+                slot = slot,
+                name = row and tostring(row.name or "") or "",
+                count = row and #(row.echoes or {}) or 0,
+                available = true,
+                active = tonumber(slots.activeSlot) == slot,
+                wishlist = linked, wishlistSlot = linked and linked.slot or nil,
+            }
         end
     end
-    table.sort(out, function(a, b) return (tonumber(a.slot) or 0) < (tonumber(b.slot) or 0) end)
     return out
 end
 
@@ -932,12 +1126,18 @@ end
 
 -- FreezePerk emits no success signal of its own [mirrors BanishPerk/
 -- RequestReroll]; release comes from the pendingFreezeIndex latch via
--- WatchLatches/ResolveInFlight like every other mutator. Never at level
--- 80 (no next board for a freeze to carry into). Never a blocked card.
+-- WatchLatches/ResolveInFlight like every other mutator. At level 80 it
+-- requires a trustworthy horizon above one so a next board exists. Never
+-- targets a blocked card.
 function A.Freeze(index0)
     if A.InFlight() then return false, "in flight" end
     if deadLatch.freeze then return false, "freeze dead this session" end
-    if (UnitLevel("player") or 0) >= 80 then return false, "no next board" end
+    if (UnitLevel("player") or 0) >= 80 then
+        local horizon = A.Horizon()
+        if type(horizon) ~= "number" or horizon <= 1 then
+            return false, "no confirmed next board"
+        end
+    end
     local board = A.Board()
     if not board then return false, "no board" end
     local card = board.cards[index0 + 1]
@@ -1118,7 +1318,12 @@ local function InstallHooks()
     end
     if pe.EchoJournal and type(pe.EchoJournal.OnDataChanged) == "function" then
         hooksecurefunc(pe.EchoJournal, "OnDataChanged", function()
-            pcall(function() slotsDirty = true; dataDirty = true end)
+            pcall(function()
+                slotsDirty = true; dataDirty = true
+                if Nexus.JournalTab and Nexus.JournalTab.RefreshAssociations then
+                    Nexus.JournalTab.RefreshAssociations()
+                end
+            end)
         end)
     end
     local svc = PS()

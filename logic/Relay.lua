@@ -33,23 +33,30 @@ local function SameKey(a, b)
 end
 
 local function SnapshotMatches(row, expected)
-    if not Verified(row) or type(expected) ~= "table" then return false end
+    if not Verified(row) or type(expected) ~= "table"
+        or type(expected.bySpell) ~= "table" then
+        return false
+    end
     local actual = {}
     for i = 1, #row.echoes do
         local entry = row.echoes[i]
-        local family = type(entry) == "table" and entry.family or nil
-        if family == nil then return false end
+        local spellId = type(entry) == "table" and tonumber(entry.spellId) or nil
+        if spellId == nil then return false end
         local count = tonumber(entry.stacks or entry.count) or 1
-        if count < 0 then return false end
-        actual[tostring(family)] = (actual[tostring(family)] or 0) + count
+        if count < 1 or count ~= math.floor(count) then return false end
+        actual[tostring(spellId)] =
+            (actual[tostring(spellId)] or 0) + count
     end
-    for family, count in pairs(expected) do
-        if (tonumber(actual[tostring(family)]) or 0) ~= (tonumber(count) or 0) then
+    for spellId, count in pairs(expected.bySpell) do
+        if (tonumber(actual[tostring(spellId)]) or 0)
+            ~= (tonumber(count) or 0) then
             return false
         end
     end
-    for family, count in pairs(actual) do
-        if (tonumber(expected[tostring(family)]) or 0) ~= (tonumber(count) or 0) then
+    for spellId, count in pairs(actual) do
+        if (tonumber(expected.bySpell[tostring(spellId)])
+            or tonumber(expected.bySpell[tonumber(spellId)]) or 0)
+            ~= (tonumber(count) or 0) then
             return false
         end
     end

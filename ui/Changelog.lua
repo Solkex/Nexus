@@ -4,7 +4,7 @@ Nexus = Nexus or {}
 local M = {}
 Nexus.Changelog = M
 
-local VERSION = "1.17"
+local VERSION = "1.18"
 local frame
 local shownThisSession = false
 
@@ -28,7 +28,7 @@ local function Create()
 
     local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("TOP", 0, -20)
-    title:SetText("Nexus 1.17")
+    title:SetText("Nexus 1.18")
 
     local body = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     body:SetPoint("TOPLEFT", 28, -52)
@@ -37,8 +37,8 @@ local function Create()
     body:SetJustifyV("TOP")
     body:SetText(
         "|cff4dff80Fixed:|r A guaranteed Echo only counts when its exact quality meets the wishlist target.\n" ..
-        "|cffffd200Improved:|r Two-Snapshot relay, final-board search, stack-aware saves, and saved wishlist associations now work together.\n" ..
-        "|cffffd200Safety:|r Unrelated or stronger Snapshots are preserved, and the latest peer identity checks remain enabled."
+        "|cffffd200Improved:|r Two-Snapshot relay, final-board search, exact quality-tier quotas, and saved wishlist associations now work together.\n" ..
+        "|cffffd200Safety:|r Saves and relay activation verify exact Echo variants; disabled or refused search actions always fall through safely."
     )
 
     local close = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")

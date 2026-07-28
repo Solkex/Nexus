@@ -67,7 +67,7 @@ The HUD shows:
 
 Browse builds shared by other Nexus users, filter by class, preview Echoes, and copy an exact build into your own wishlist.
 
-Nexus 1.17 uses a throttled peer-to-peer sync system. **Sync now** requests build summaries and DPS records from online Nexus users, then safely backfills missing exact loadouts. Nexus also performs a delayed, rate-limited sync after login.
+Nexus 1.18 uses a throttled peer-to-peer sync system. **Sync now** requests build summaries and DPS records from online Nexus users, then safely backfills missing exact loadouts. Nexus also performs a delayed, rate-limited sync after login.
 
 ### DPS Leaderboards
 
@@ -147,7 +147,7 @@ Interface\AddOns\Nexus-main\Nexus\Nexus.toc
 
 ## Source Code
 
-The complete Nexus 1.17 source code is publicly available in this repository.
+The complete Nexus 1.18 source code is publicly available in this repository.
 
 Developers may clone or download the repository source. Players should install the prepared [Nexus.zip release](https://github.com/Solkex/Nexus/releases/latest/download/Nexus.zip) instead.
 

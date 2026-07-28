@@ -7,7 +7,7 @@
 -- any closure that reads it.
 
 Nexus = Nexus or {}
-Nexus.VERSION = "1.17"
+Nexus.VERSION = "1.18"
 
 local Model, Policy, Ratchet, Relay, Strategy, Store, Adapter
 local Readout, Panel, JournalTab, DefaultProfile
@@ -79,6 +79,13 @@ local function CopyCounts(src)
     return out
 end
 
+local function CopyOwnedSnapshot(owned)
+    return {
+        byFamily = CopyCounts(type(owned) == "table" and owned.byFamily or nil),
+        bySpell = CopyCounts(type(owned) == "table" and owned.bySpell or nil),
+    }
+end
+
 local function AppendAudit(kind, fields)
     if type(NexusDB) ~= "table" then return end
     NexusDB.runAudit = NexusDB.runAudit or {}
@@ -142,9 +149,8 @@ local function AutoAllowed()
     return true
 end
 
--- Wishlist progress for this run: how many wished FAMILIES are owned, and
--- how many total, family-granular (same identity rule as everything else
--- -- addendum B2). Pure; malformed plan/owned degrades to 0/0.
+-- Wishlist progress for this run, qualified by each requested quality tier.
+-- Pure; malformed plan/owned degrades to 0/0.
 -- This run's progress toward the wishlist's total STACK target (the
 -- "79" number) -- not a family-boolean count. A family sitting at 1 of
 -- 9 needed copies contributes only 1 toward the total, not a full
@@ -158,13 +164,18 @@ local function WishlistProgress(plan, owned, catalog)
         return 0, 0, missing
     end
     local targets = type(plan.targets) == "table" and plan.targets or {}
-    local byFamily = (type(owned) == "table" and owned.byFamily) or {}
     local bySpell  = (type(owned) == "table" and owned.bySpell)  or {}
     for fam in pairs(plan.wishedFamilies) do
         local target = targets[fam]
         local want = (type(target) == "table" and tonumber(target.targetStacks)) or 1
+        local have
+        if Model and type(Model.TargetProgress) == "function" then
+            have, want = Model.TargetProgress(plan, catalog, fam, owned)
+        else
+            local byFamily = (type(owned) == "table" and owned.byFamily) or {}
+            have = math.min(tonumber(byFamily[fam]) or 0, want)
+        end
         stackTotal = stackTotal + want
-        local have = math.min(tonumber(byFamily[fam]) or 0, want)
         stackCount = stackCount + have
         if have < want then
             local nm = catalog and catalog.familyName and catalog.familyName[fam]
@@ -235,34 +246,71 @@ local function FamilyCountsFromEchoes(echoes, catalog)
     return out
 end
 
+local function OwnedFromEchoes(echoes, catalog)
+    local owned = {
+        byFamily = FamilyCountsFromEchoes(echoes, catalog),
+        bySpell = {},
+    }
+    for i = 1, #(echoes or {}) do
+        local entry = echoes[i]
+        local spellId = type(entry) == "table" and tonumber(entry.spellId) or nil
+        if spellId then
+            local count = tonumber(entry.stacks or entry.count) or 1
+            owned.bySpell[spellId] =
+                (tonumber(owned.bySpell[spellId]) or 0) + count
+        end
+    end
+    return owned
+end
+
 local function SlotMatchesSnapshot(row, snap, catalog)
-    if type(row) ~= "table" or type(row.echoes) ~= "table" or type(snap) ~= "table" then
+    if type(row) ~= "table" or type(row.echoes) ~= "table"
+        or type(snap) ~= "table" or type(snap.bySpell) ~= "table" then
         return false
     end
-    local actual = FamilyCountsFromEchoes(row.echoes, catalog)
-    for fam, n in pairs(snap) do
-        if (tonumber(actual[fam]) or 0) ~= (tonumber(n) or 0) then return false end
+    local actual = {}
+    for i = 1, #row.echoes do
+        local entry = row.echoes[i]
+        local spellId = type(entry) == "table"
+            and tonumber(entry.spellId) or nil
+        local count = type(entry) == "table"
+            and (tonumber(entry.stacks or entry.count) or 1) or nil
+        if spellId == nil or count == nil
+            or count < 1 or count ~= math.floor(count) then
+            return false
+        end
+        actual[spellId] = (tonumber(actual[spellId]) or 0) + count
     end
-    for fam, n in pairs(actual) do
-        if (tonumber(snap[fam]) or 0) ~= (tonumber(n) or 0) then return false end
+    for spellId, count in pairs(snap.bySpell) do
+        local have = tonumber(actual[spellId])
+            or tonumber(actual[tonumber(spellId)]) or 0
+        if have ~= (tonumber(count) or 0) then return false end
+    end
+    for spellId, count in pairs(actual) do
+        local want = tonumber(snap.bySpell[spellId])
+            or tonumber(snap.bySpell[tostring(spellId)]) or 0
+        if want ~= (tonumber(count) or 0) then return false end
     end
     return true
 end
 
 local function SaveChangeSummary(owned, incumbentEchoes, plan, catalog)
-    local before = FamilyCountsFromEchoes(incumbentEchoes, catalog)
-    local after = (owned and owned.byFamily) or {}
+    local before = OwnedFromEchoes(incumbentEchoes, catalog)
+    local after = type(owned) == "table" and owned
+        or { byFamily = {}, bySpell = {} }
     local wished = (plan and plan.wishedFamilies) or {}
-    local targets = (plan and plan.targets) or {}
     local gained, shed = {}, {}
     local beforeProgress, afterProgress = 0, 0
 
     for fam in pairs(wished) do
-        local target = targets[fam]
-        local cap = (type(target) == "table" and tonumber(target.targetStacks)) or 1
-        if cap < 1 then cap = 1 end
-        local b = math.min(tonumber(before[fam]) or 0, cap)
-        local a = math.min(tonumber(after[fam]) or 0, cap)
+        local b, a
+        if Model and type(Model.TargetProgress) == "function" then
+            b = Model.TargetProgress(plan, catalog, fam, before)
+            a = Model.TargetProgress(plan, catalog, fam, after)
+        else
+            b = tonumber(before.byFamily[fam]) or 0
+            a = tonumber(after.byFamily and after.byFamily[fam]) or 0
+        end
         beforeProgress = beforeProgress + b
         afterProgress = afterProgress + a
         local d = a - b
@@ -299,14 +347,12 @@ local function LoadoutCoverage(activeRow, plan, catalog)
         or type(plan) ~= "table" or type(plan.wishedFamilies) ~= "table" then
         return {}, nil, {}
     end
-    local targets = type(plan.targets) == "table" and plan.targets or {}
-    local famStacks = {}
+    local snapshotOwned = OwnedFromEchoes(activeRow.echoes, catalog)
     local locked = {}
     for i = 1, #activeRow.echoes do
         local e = activeRow.echoes[i]
         local fam = e and e.family
         if fam and plan.wishedFamilies[fam] then
-            famStacks[fam] = (famStacks[fam] or 0) + (tonumber(e.stacks) or 1)
             if e.locked then
                 local row = catalog and catalog.rows and catalog.rows[e.spellId]
                 locked[#locked + 1] = (row and row.name) or ("spell " .. tostring(e.spellId))
@@ -316,10 +362,18 @@ local function LoadoutCoverage(activeRow, plan, catalog)
     local stackTotal, stackCount = 0, 0
     local missing = {}
     for fam in pairs(plan.wishedFamilies) do
-        local target = targets[fam]
-        local want = (type(target) == "table" and tonumber(target.targetStacks)) or 1
+        local have, want
+        if Model and type(Model.TargetProgress) == "function" then
+            have, want = Model.TargetProgress(
+                plan, catalog, fam, snapshotOwned)
+        else
+            local target = type(plan.targets) == "table"
+                and plan.targets[fam] or nil
+            want = (type(target) == "table"
+                and tonumber(target.targetStacks)) or 1
+            have = tonumber(snapshotOwned.byFamily[fam]) or 0
+        end
         stackTotal = stackTotal + want
-        local have = famStacks[fam] or 0
         stackCount = stackCount + math.min(have, want)
         if have < want then
             local nm = catalog and catalog.familyName and catalog.familyName[fam]
@@ -939,10 +993,7 @@ local function StepSave(level, plan, slots, owned)
                 -- The verify check compares the refreshed slot against this
                 -- snapshot, NOT against live owned -- live owned keeps
                 -- accumulating but the slot reflects what was saved.
-                local snap = {}
-                if type(owned.byFamily) == "table" then
-                    for fam, n in pairs(owned.byFamily) do snap[fam] = n end
-                end
+                local snap = CopyOwnedSnapshot(owned)
                 saveVerifySlot, saveVerifyAt, seedVerify, saveVerifySnap =
                     target, GetTime(), false, snap
                 saveVerifyExpectedActive = tonumber(incumbent.slot)
@@ -957,7 +1008,7 @@ local function StepSave(level, plan, slots, owned)
                 slotsRefreshAt = GetTime() + 3.5
                 AppendAudit("SAVE_SENT", {
                     targetSlot = target, expectedActive = incumbent.slot,
-                    candidate = WishedCounts(snap, plan),
+                    candidate = WishedCounts(snap.byFamily, plan),
                     summary = (saveVerifySummary or "") .. " via " .. tostring(targetReason),
                 })
             end
@@ -1097,16 +1148,17 @@ local function Step()
             confirmed = row ~= nil                 -- the empty slot is now populated
         else
             -- Confirmed when the slot no longer lags behind what we saved.
-            -- We compare saveVerifySnap (the candidate's byFamily at save
-            -- time) against row.echoes (what the server now reports).
+            -- We compare saveVerifySnap (the candidate's exact spell/stack
+            -- identity at save time) against row.echoes (what the server now
+            -- reports).
             -- Using live `owned` here was wrong: owned keeps accumulating
             -- while the slot reflects only what was written, so a stale
             -- slot always looked "still dominated" and the 8-second timeout
             -- would fire, reset savedThisVisit, and trigger a second save.
             if row ~= nil and saveVerifySnap then
-                -- Exact family/stack snapshot match. This proves the response
-                -- belongs to the slot and write we sent; a merely different or
-                -- unrelated loadout is never accepted as confirmation.
+                -- Exact spell/stack snapshot match. This proves the response
+                -- belongs to the slot and write we sent; a different quality
+                -- variant or unrelated loadout is never accepted.
                 confirmed = SlotMatchesSnapshot(row, saveVerifySnap, catalog)
             elseif row ~= nil and not saveVerifySnap then
                 confirmed = false
@@ -1120,7 +1172,9 @@ local function Step()
         if confirmed then
             AppendAudit("SAVE_CONFIRMED", {
                 targetSlot = saveVerifySlot, activeSlot = slots and slots.activeSlot or 0,
-                candidate = CopyCounts(saveVerifySnap), summary = saveVerifySummary or "",
+                candidate = CopyCounts(
+                    saveVerifySnap and saveVerifySnap.byFamily),
+                summary = saveVerifySummary or "",
             })
             if saveVerifyRelay then
                 local relay = saveVerifyRelay
@@ -1138,7 +1192,10 @@ local function Step()
                         targetSlot = relay.targetSlot,
                         wishlistKey = relay.wishlistKey,
                         wishlistSlot = relay.wishlistSlot,
-                        snapshot = CopyCounts(saveVerifySnap),
+                        snapshot = {
+                            byFamily = CopyCounts(saveVerifySnap.byFamily),
+                            bySpell = CopyCounts(saveVerifySnap.bySpell),
+                        },
                     }
                     SetStatus("improved run saved to inactive Snapshot "
                         .. relay.targetSlot .. "; it will arm next run")
@@ -1166,7 +1223,8 @@ local function Step()
         elseif GetTime() - (saveVerifyAt or 0) > 8 then
             AppendAudit("SAVE_TIMEOUT", {
                 targetSlot = saveVerifySlot, activeSlot = slots and slots.activeSlot or 0,
-                candidate = CopyCounts(saveVerifySnap),
+                candidate = CopyCounts(
+                    saveVerifySnap and saveVerifySnap.byFamily),
             })
             saveGateAuditedVisit = false
             savedThisVisit = false                 -- unconfirmed -> allow a retry
@@ -1219,16 +1277,40 @@ local function JournalData()
     else
         local ownedN, pending, filler = 0, {}, {}
         for fam in pairs(plan.wishedFamilies) do
-            if (owned.byFamily[fam] or 0) > 0 then ownedN = ownedN + 1
-            else pending[#pending + 1] = catalog.familyName[fam] or fam end
+            local have, want
+            if Model and type(Model.TargetProgress) == "function" then
+                have, want = Model.TargetProgress(plan, catalog, fam, owned)
+            else
+                have = tonumber(owned.byFamily[fam]) or 0
+                local target = type(plan.targets) == "table"
+                    and plan.targets[fam] or nil
+                want = type(target) == "table"
+                    and tonumber(target.targetStacks) or 1
+            end
+            if have >= want then
+                ownedN = ownedN + 1
+            else
+                pending[#pending + 1] = catalog.familyName[fam] or fam
+            end
         end
         local activeRow = ActiveSlotRow(slots)   -- genuinely-verified only
         if activeRow then
+            local activeOwned = OwnedFromEchoes(activeRow.echoes, catalog)
             local seen = {}
             for _, e in ipairs(activeRow.echoes) do
-                if not plan.wishedFamilies[e.family] and not seen[e.family] then
-                    seen[e.family] = true
-                    filler[#filler + 1] = catalog.familyName[e.family] or e.family
+                local family = e.family
+                    or (catalog.familyOf and catalog.familyOf[e.spellId])
+                local qualified = 0
+                if family and plan.wishedFamilies[family]
+                    and Model and type(Model.TargetProgress) == "function" then
+                    qualified = Model.TargetProgress(
+                        plan, catalog, family, activeOwned)
+                end
+                if family and (not plan.wishedFamilies[family]
+                    or qualified <= 0) and not seen[family] then
+                    seen[family] = true
+                    filler[#filler + 1] =
+                        catalog.familyName[family] or family
                 end
             end
         end
@@ -1265,7 +1347,7 @@ local function JournalData()
         local activeRow = ActiveSlotRow(slots)
         local queue = Ratchet.PredictQueue(activeRow and activeRow.echoes or {},
             owned, plan, flags, disabledLevers, catalog)
-        local e = Ratchet.RunsEstimate(plan, owned, queue, nil)
+        local e = Ratchet.RunsEstimate(plan, owned, queue, nil, catalog)
         est = (e and e.text) or "estimate unavailable"
     end
     sections[#sections + 1] = { title = "Notes", lines = {
@@ -1507,7 +1589,7 @@ local function NewSupportExportCoroutine()
         end
 
         local out = {
-            "NEXUS_AI_DIAGNOSTIC_LOG_3",
+            "NEXUS_DIAGNOSTIC_LOG_3",
             "version=" .. Esc(Nexus.VERSION) .. "|boards=" .. #log .. "|audits=" .. #audits,
             "B=board|C=card|U=user action|Q=predicted guarantee queue head|A=run/save audit|D=dictionary",
             "B|i|time|level|guaranteedIndex|banish|reroll|freeze|trusted|actionRef|spellId|cardIndex|reasonRef|pendingRef|mismatch|activeSlot|run|queueN|horizon|endgame",

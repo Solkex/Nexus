@@ -33,9 +33,11 @@ local function Wished(plan, fam)
         and plan.wishedFamilies[fam] and true or false
 end
 
-local function WishedQuality(model, plan, catalog, fam)
+local function WishedQuality(model, plan, catalog, fam, owned)
     if type(model.EffectiveWishedQuality) == "function" then
-        return tonumber(model.EffectiveWishedQuality(plan, catalog, fam)) or 0
+        local bySpell = type(owned) == "table" and owned.bySpell or nil
+        return tonumber(model.EffectiveWishedQuality(
+            plan, catalog, fam, OwnedFam(owned, fam), bySpell)) or 0
     end
     local target = type(plan.targets) == "table" and plan.targets[fam] or nil
     return (type(target) == "table" and tonumber(target.wishedQuality)) or 0
@@ -50,25 +52,38 @@ local function IsWanted(model, card, delta, plan, owned, catalog)
     -- Model.Delta applies the quality gate. A below-required-quality variant
     -- therefore cannot become wanted merely because its family is wished.
     if type(model.FamilyMultiQuality) == "function"
-        and model.FamilyMultiQuality(catalog, card.family)
-        and (tonumber(card.quality) or 0)
-            < WishedQuality(model, plan, catalog, card.family) then
-        return false
+        and model.FamilyMultiQuality(catalog, card.family) then
+        if type(model.QualityOfferNeeded) == "function" then
+            if not model.QualityOfferNeeded(
+                plan, catalog, card.family,
+                tonumber(card.quality) or 0, owned) then
+                return false
+            end
+        elseif (tonumber(card.quality) or 0)
+            < WishedQuality(model, plan, catalog, card.family, owned) then
+            return false
+        end
     end
     return true
 end
 
 local function IsOneShot(model, card, plan, owned, catalog)
-    return OwnedFam(owned, card.family) <= 0
-        and type(model.FamilyMultiQuality) == "function"
+    local have = OwnedFam(owned, card.family)
+    if type(model.TargetProgress) == "function" then
+        have = model.TargetProgress(plan, catalog, card.family, owned)
+    end
+    return have <= 0 and type(model.FamilyMultiQuality) == "function"
         and model.FamilyMultiQuality(catalog, card.family)
-        and (tonumber(card.quality) or 0)
-            >= WishedQuality(model, plan, catalog, card.family)
+        and (type(model.QualityOfferNeeded) ~= "function"
+            or model.QualityOfferNeeded(
+                plan, catalog, card.family,
+                tonumber(card.quality) or 0, owned))
 end
 
 local function WantedTier(model, card, plan, owned, catalog)
     if type(model.StackWishBelowTarget) == "function"
-        and model.StackWishBelowTarget(plan, owned, card.family) then
+        and model.StackWishBelowTarget(
+            plan, owned, card.family, catalog) then
         return 1
     end
     if IsOneShot(model, card, plan, owned, catalog) then return 2 end
@@ -93,7 +108,8 @@ local function QueueCanDeliverWanted(model, state, card, plan, catalog)
 
     local multiQuality = type(model.FamilyMultiQuality) == "function"
         and model.FamilyMultiQuality(catalog, card.family)
-    local requiredQuality = WishedQuality(model, plan, catalog, card.family)
+    local requiredQuality = WishedQuality(
+        model, plan, catalog, card.family, state.owned)
     local rows = type(catalog) == "table" and catalog.rows or nil
     for i = 1, #queue do
         local entry = queue[i]
@@ -104,7 +120,14 @@ local function QueueCanDeliverWanted(model, state, card, plan, catalog)
                 and rows[tonumber(entry.spellId)] or nil
             local quality = (type(row) == "table" and tonumber(row.quality))
                 or tonumber(entry.quality)
-            if quality and quality >= requiredQuality then return true end
+            if quality and type(model.QualityOfferNeeded) == "function" then
+                if model.QualityOfferNeeded(
+                    plan, catalog, card.family, quality, state.owned) then
+                    return true
+                end
+            elseif quality and quality >= requiredQuality then
+                return true
+            end
         end
     end
     return false
@@ -114,7 +137,8 @@ local function FreezeWorthy(model, state, card, plan, owned, catalog)
     -- Guaranteed injection only supplies the family's first copy. Extra
     -- stacks remain side-card RNG and are always worth protecting.
     if type(model.StackWishBelowTarget) == "function"
-        and model.StackWishBelowTarget(plan, owned, card.family) then
+        and model.StackWishBelowTarget(
+            plan, owned, card.family, catalog) then
         return true
     end
     -- A single-stack card that the remaining queue will deliver at a useful
@@ -201,22 +225,46 @@ end
 -- wasting charges when the protected card itself completes the wishlist.
 local function MissingAfterFallback(plan, owned, fallbackCard, catalog)
     local wished = type(plan) == "table" and plan.wishedFamilies or {}
-    local targets = type(plan) == "table" and plan.targets or {}
-    local byFamily = type(owned) == "table" and owned.byFamily or {}
     local fallbackFamily = type(fallbackCard) == "table"
         and (fallbackCard.family
             or (type(catalog) == "table"
                 and type(catalog.familyOf) == "table"
-                and catalog.familyOf[tonumber(fallbackCard.spellId)]))
+            and catalog.familyOf[tonumber(fallbackCard.spellId)]))
         or nil
+    local simulated = { byFamily = {}, bySpell = {} }
+    if type(owned) == "table" then
+        for family, count in pairs(owned.byFamily or {}) do
+            simulated.byFamily[family] = tonumber(count) or 0
+        end
+        for spellId, count in pairs(owned.bySpell or {}) do
+            simulated.bySpell[spellId] = tonumber(count) or 0
+        end
+    end
+    if fallbackFamily ~= nil and type(fallbackCard) == "table" then
+        local count = tonumber(fallbackCard.stacks or fallbackCard.count) or 1
+        simulated.byFamily[fallbackFamily] =
+            (tonumber(simulated.byFamily[fallbackFamily]) or 0) + count
+        local spellId = tonumber(fallbackCard.spellId)
+        if spellId then
+            simulated.bySpell[spellId] =
+                (tonumber(simulated.bySpell[spellId]) or 0) + count
+        end
+    end
 
     for family in pairs(wished) do
-        local target = targets[family]
-        local want = type(target) == "table"
-            and tonumber(target.targetStacks) or 1
+        local have, want
+        local model = GetModel()
+        if model and type(model.TargetProgress) == "function" then
+            have, want = model.TargetProgress(
+                plan, catalog, family, simulated)
+        else
+            local target = type(plan.targets) == "table"
+                and plan.targets[family] or nil
+            want = type(target) == "table"
+                and tonumber(target.targetStacks) or 1
+            have = tonumber(simulated.byFamily[family]) or 0
+        end
         if want < 1 then want = 1 end
-        local have = tonumber(byFamily[family]) or 0
-        if fallbackFamily == family then have = have + 1 end
         if have < want then return true end
     end
     return false
@@ -642,27 +690,34 @@ function Policy.Decide(state)
     -- With no wanted card, use at most one safe Banish per fresh run-data
     -- push. A wished family is protected even when this displayed quality is
     -- below target because Banish may remove the entire family.
-    if not protectedWanted and (tonumber(charges.banish) or 0) > 0
+    local refused = type(state.searchRefused) == "table"
+        and state.searchRefused or {}
+    if not protectedWanted and state.allowBanish ~= false
+        and not refused.banish
+        and (tonumber(charges.banish) or 0) > 0
         and charges.trustworthy == true
         and not charges.banishSpentThisPush then
         local worst = SafeBanishCandidate(cards, deltas, plan, gIndex)
         if worst then
-            return {
+            local action = {
                 type = "banish", index = worst, spellId = cards[worst].spellId,
                 reason = "No wanted Echo: banish worst safe off-wishlist card",
                 annotations = annotations, deltas = deltas,
             }
+            return finalSelection and Endgame(action) or action
         end
     end
 
-    if not protectedWanted and (tonumber(charges.reroll) or 0) > 0
+    if not protectedWanted and not refused.reroll
+        and (tonumber(charges.reroll) or 0) > 0
         and charges.trustworthy == true then
-        return {
+        local action = {
             type = "reroll",
             reason = "No wanted Echo or useful safe Banish: reroll",
             annotations = annotations,
             deltas = deltas,
         }
+        return finalSelection and Endgame(action) or action
     end
 
     -- Least-harmful mandatory selection. Prefer a non-duplicate whenever one
@@ -692,8 +747,9 @@ function Policy.Decide(state)
         end
     end
     pick = pick or 1
-    return Take(cards, annotations, deltas, pick,
+    local action = Take(cards, annotations, deltas, pick,
         annotations[pick] == "duplicate"
             and "Forced take: every selectable Echo is already owned"
             or "Forced least-harmful selection")
+    return finalSelection and Endgame(action) or action
 end

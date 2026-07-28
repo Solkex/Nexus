@@ -5,10 +5,10 @@ dofile("logic/Policy.lua")
 
 local rows = {
     [210] = {
-        spellId=210, name="Quality Target", quality=0, maxStack=1,
+        spellId=210, name="Quality Target", quality=0, maxStack=10,
     },
     [211] = {
-        spellId=211, name="Quality Target", quality=2, maxStack=1,
+        spellId=211, name="Quality Target", quality=2, maxStack=10,
     },
     [400] = {
         spellId=400, name="Filler A", quality=1, maxStack=1,
@@ -101,5 +101,40 @@ local tiered = Nexus.Policy.Decide({
 })
 assert(tiered.type == "take" and tiered.index == 2,
     "an explicitly requested lower quality tier must remain a usable guarantee")
+
+local tierOwned = {
+    synced=true,
+    bySpell={ [210]=1 },
+    byFamily={ quality=1 },
+}
+local surplusLowTier = Nexus.Policy.Decide({
+    board={
+        cards={ card(400), card(210, true), card(401) },
+        guaranteedIndex=2,
+    },
+    owned=tierOwned,
+    charges={ freeze=0, banish=0, reroll=0, trustworthy=true },
+    plan=tieredPlan,
+    queue={ entries={} },
+    catalog=catalog,
+    level=20,
+})
+assert(surplusLowTier.type == "take" and surplusLowTier.index ~= 2,
+    "a filled low-quality tier must not absorb a higher-quality tier quota")
+
+local neededHighTier = Nexus.Policy.Decide({
+    board={
+        cards={ card(400), card(211, true), card(401) },
+        guaranteedIndex=2,
+    },
+    owned=tierOwned,
+    charges={ freeze=0, banish=0, reroll=0, trustworthy=true },
+    plan=tieredPlan,
+    queue={ entries={} },
+    catalog=catalog,
+    level=20,
+})
+assert(neededHighTier.type == "take" and neededHighTier.index == 2,
+    "the remaining exact quality tier must stay guarantee-eligible")
 
 print("wrong-quality guarantee regression OK")

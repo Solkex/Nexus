@@ -3,9 +3,10 @@
 -- overwrite, slot scoring, runs estimate. PURE -- no WoW API, no
 -- ProjectEbonhold, no SavedVariables; loads under bare LuaJIT.
 --
--- Identity is FAMILY-granular throughout (addendum B2): any quality
--- variant of a wished family counts as coverage/filler. The predicted
--- queue is planning/UI-only -- coverage decisions never read it.
+-- Queue subtraction remains FAMILY-granular (addendum B2), matching the
+-- server guarantee contract. Wishlist progress and save scoring are stricter:
+-- multi-quality families count only the requested quality-qualified copies.
+-- The predicted queue is planning/UI-only -- coverage decisions never read it.
 
 Nexus = Nexus or {}
 local M = {}
@@ -44,6 +45,41 @@ local function EchoFamilySets(echoes, wished, catalog)
         end
     end
     return cov, fill
+end
+
+local function OwnedFromEchoes(echoes, catalog)
+    local owned = { byFamily = {}, bySpell = {} }
+    for i = 1, #(echoes or {}) do
+        local entry = echoes[i]
+        local family = FamOf(entry, catalog)
+        local spellId = type(entry) == "table" and tonumber(entry.spellId) or nil
+        local count = type(entry) == "table"
+            and (tonumber(entry.stacks or entry.count) or 1) or 0
+        if family ~= nil and count > 0 then
+            owned.byFamily[family] =
+                (tonumber(owned.byFamily[family]) or 0) + count
+        end
+        if spellId and count > 0 then
+            owned.bySpell[spellId] =
+                (tonumber(owned.bySpell[spellId]) or 0) + count
+        end
+    end
+    return owned
+end
+
+local function TargetProgress(plan, catalog, family, owned)
+    local model = Nexus.Model
+    if type(model) == "table" and type(model.TargetProgress) == "function" then
+        return model.TargetProgress(plan, catalog, family, owned)
+    end
+    local target = type(plan) == "table"
+        and type(plan.targets) == "table" and plan.targets[family] or nil
+    local want = type(target) == "table"
+        and tonumber(target.targetStacks) or 1
+    if want < 1 then want = 1 end
+    local byFamily = type(owned) == "table" and owned.byFamily or nil
+    local have = tonumber(byFamily and byFamily[family]) or 0
+    return math.min(have, want), want
 end
 
 local function SortedNames(set, catalog)
@@ -86,10 +122,22 @@ function M.PredictQueue(activeEchoes, owned, plan, flags, disabledLevers, catalo
                 end
             end
             if not skip then
+                local wanted = not not wished[fam]
+                local model = Nexus.Model
+                local row = rows and rows[spellId]
+                local quality = type(row) == "table"
+                    and tonumber(row.quality) or tonumber(e.quality)
+                if wanted and type(model) == "table"
+                    and type(model.QualityOfferNeeded) == "function"
+                    and quality ~= nil then
+                    wanted = model.QualityOfferNeeded(
+                        plan, catalog, fam, quality, owned)
+                end
                 out.entries[#out.entries + 1] = {
                     spellId = spellId,
                     family = fam,
-                    wanted = not not wished[fam],
+                    quality = quality,
+                    wanted = wanted,
                 }
             end
         end
@@ -113,19 +161,15 @@ function M.Dominates(candidateOwned, incumbentEchoes, plan, catalog)
     end
 
     local wished = (type(plan) == "table" and plan.wishedFamilies) or {}
-    local targets = (type(plan) == "table" and plan.targets) or {}
-
     -- Count the saved loadout exactly as the server serialized it. Duplicate
     -- entries and entries carrying a stacks/count field all contribute.
-    local incStacksByFam = {}
+    local incumbentOwned = OwnedFromEchoes(incumbentEchoes, catalog)
     local incFill, candFill = {}, {}
     for _, e in ipairs(incumbentEchoes) do
         local fam = FamOf(e, catalog)
         if fam then
             local n = tonumber(e.stacks or e.count) or 1
-            if wished[fam] then
-                incStacksByFam[fam] = (incStacksByFam[fam] or 0) + n
-            elseif Pos(n) then
+            if not wished[fam] and Pos(n) then
                 incFill[fam] = true
             end
         end
@@ -145,11 +189,21 @@ function M.Dominates(candidateOwned, incumbentEchoes, plan, catalog)
     local incumbentProgress, candidateProgress = 0, 0
     local gainedStacks, lostStacks = 0, 0
     for fam in pairs(wished) do
-        local target = targets[fam]
-        local cap = (type(target) == "table" and tonumber(target.targetStacks)) or 1
-        if cap < 1 then cap = 1 end
-        local before = math.min(tonumber(incStacksByFam[fam]) or 0, cap)
-        local after = math.min(tonumber(candidateOwned.byFamily[fam]) or 0, cap)
+        local before = TargetProgress(
+            plan, catalog, fam, incumbentOwned)
+        local after = TargetProgress(
+            plan, catalog, fam, candidateOwned)
+        -- A wished-family copy that supplies zero qualified progress is still
+        -- filler. Otherwise a below-target variant could replace an ordinary
+        -- filler, look "cleaner", and incorrectly pass the save gate.
+        if before <= 0
+            and (tonumber(incumbentOwned.byFamily[fam]) or 0) > 0 then
+            incFill[fam] = true
+        end
+        if after <= 0
+            and (tonumber(candidateOwned.byFamily[fam]) or 0) > 0 then
+            candFill[fam] = true
+        end
         incumbentProgress = incumbentProgress + before
         candidateProgress = candidateProgress + after
         local d = after - before
@@ -205,10 +259,9 @@ end
 
 function M.ScoreSlot(slotEchoes, plan, catalog)
     local wished  = (type(plan) == "table" and plan.wishedFamilies) or {}
-    local targets = (type(plan) == "table" and plan.targets) or {}
-    local cov, fill = EchoFamilySets(slotEchoes, wished, catalog)
+    local _, fill = EchoFamilySets(slotEchoes, wished, catalog)
+    local owned = OwnedFromEchoes(slotEchoes, catalog)
     local nc, nf = 0, 0
-    for _ in pairs(cov) do nc = nc + 1 end
     for _ in pairs(fill) do nf = nf + 1 end
 
     -- Stack bonus: for each wished stacking family, add fractional credit
@@ -217,21 +270,15 @@ function M.ScoreSlot(slotEchoes, plan, catalog)
     -- calls for 67×Rend.  Weight < 1 so a stack bonus never outweighs a
     -- genuinely new echo family.
     local stackBonus = 0
-    if type(slotEchoes) == "table" then
-        local stacksByFam = {}
-        for _, e in ipairs(slotEchoes) do
-            local fam = FamOf(e, catalog)
-            if fam and wished[fam] then
-                stacksByFam[fam] = (stacksByFam[fam] or 0)
-                    + (tonumber(e.stacks or e.count) or 1)
-            end
+    for family in pairs(wished) do
+        local have, want = TargetProgress(plan, catalog, family, owned)
+        if have > 0 then nc = nc + 1 end
+        if have <= 0
+            and (tonumber(owned.byFamily[family]) or 0) > 0 then
+            nf = nf + 1
         end
-        for fam, count in pairs(stacksByFam) do
-            local t = targets[fam]
-            local target = (type(t) == "table" and tonumber(t.targetStacks)) or 1
-            if target > 1 then
-                stackBonus = stackBonus + 0.9 * math.min(count, target) / target
-            end
+        if want > 1 then
+            stackBonus = stackBonus + 0.9 * math.min(have, want) / want
         end
     end
 
@@ -269,15 +316,15 @@ end
 -- count: unknown stays true and the text reports only what is known.
 ------------------------------------------------------------------------
 
-function M.RunsEstimate(plan, owned, queue, support)
+function M.RunsEstimate(plan, owned, queue, support, catalog)
     local wished = type(plan) == "table" and plan.wishedFamilies or nil
     if not wished or not next(wished) then
         return { text = "no wishlist target - advisor mode", unknown = true }
     end
-    local byFamily = (type(owned) == "table" and owned.byFamily) or {}
     local pending = 0
     for fam in pairs(wished) do
-        if not Pos(byFamily[fam]) then pending = pending + 1 end
+        local have, want = TargetProgress(plan, catalog, fam, owned)
+        if have < want then pending = pending + 1 end
     end
     local queued, seen = 0, {}
     local entries = type(queue) == "table" and queue.entries or nil

@@ -1,14 +1,14 @@
-# Nexus — internal module contracts (v1.0.0)
+# Nexus — internal module contracts (v1.18)
 
-Binding interface spec for all modules. Authored from `WISHLIST_REALIZER_BUILD_PROMPT.md`
-+ `WISHLIST_REALIZER_SPEC_ADDENDUM.md` + `WISHLIST_REALIZER_DESIGN.md` (the addendum wins
-conflicts). Every `logic/*` and `data/*` file: plain Lua 5.1, NO WoW API, NO
+Binding interface spec for all modules. When an older design note conflicts
+with a later addendum, the addendum wins. Every `logic/*` and `data/*` file:
+plain Lua 5.1, NO WoW API, NO
 SavedVariables, NO `ProjectEbonhold.*` — loadable under bare LuaJIT. All cross-module
 data is plain tables produced by `core/GameAdapter.lua` (the only IO module).
 
 Global namespace: `Nexus` (each file: `Nexus = Nexus or {};
-local M = {}; Nexus.<Name> = M`). Version: `Nexus.VERSION = "1.0.0"`
-set in Main; .toc `## Version: 1.0.0` kept in lockstep.
+local M = {}; Nexus.<Name> = M`). Version: `Nexus.VERSION = "1.18"`
+set in Main; .toc `## Version: 1.18` kept in lockstep.
 
 Lua 5.1 rules: no `goto`, no `#` on non-sequences, `unpack` global, sort pairs for
 deterministic output, forward-declare every closure-captured local BEFORE the closure,
@@ -79,12 +79,19 @@ Fork from EchoOptimizer/logic/Model.lua VERBATIM: `NormName`, `StripRaritySuffix
   qualities for coverage purposes but NOT pool presence (pool removal is per-spellId).
   `value` = `Model.Delta(...)` for that spellId.
 - `Model.Delta(plan, owned, spellId, catalog, params)` → number. Ordinal scale
-  (`params` from data/DefaultProfile): uncovered wished family → `params.coverage`
-  (+ `params.qualityBonus * quality`); wished stackable below targetStacks →
+  (`params` from data/DefaultProfile): an unmet, quality-qualified wished target →
+  `params.coverage` (+ `params.qualityBonus * quality`); wished stackable below
+  its exact target tier →
   `params.coverage * (remaining/target)` decreasing; anchor spellId itself uncovered →
   `params.anchorUnlock`; unique new family while anchor owned → `+params.diversity`;
   duplicate of an owned maxStack==1 family → `params.duplicate` (≈0/negative);
-  off-wishlist non-duplicate → `params.filler` (negative). Pure function, no state.
+  a non-requested quality → `params.qualityMiss`; off-wishlist non-duplicate →
+  `params.filler` (negative). Pure function, no state.
+- `Model.TargetProgress(plan, catalog, family, owned)` → `have, want` with exact
+  tier quotas for multi-tier targets and threshold-qualified counts for a
+  single-tier multi-quality target.
+- `Model.QualityOfferNeeded(plan, catalog, family, quality, owned)` → boolean;
+  false once that exact tier is filled or the offered quality is below target.
 - `Model.FreeDist(support)` → `BuildDistribution` over support with UNIFORM probs
   (θ unmeasured); nil-safe on empty support (return nil → callers treat E as 0).
 
@@ -111,12 +118,14 @@ Fork from EchoOptimizer/logic/Model.lua VERBATIM: `NormName`, `StripRaritySuffix
 ## logic/Ratchet.lua — `Nexus.Ratchet`
 
 - `Ratchet.PredictQueue(activeEchoes, owned, plan, flags, disabledLevers, catalog)` →
-  `{ entries = { { spellId, family, wanted=bool }, ... } }` in given order, skipping
+  `{ entries = { { spellId, family, quality, wanted=bool }, ... } }` in given order, skipping
   entries whose FAMILY is owned (family-aware subtraction, addendum §B2), and — iff
   `flags.DISABLE_SUPPRESSES_GUARANTEE` — skipping members of disabled levers.
+  `wanted` is quality-qualified against the remaining target.
   Prediction is planning/UI-only; never coverage.
 - `Ratchet.Dominates(candidateOwned, incumbentEchoes, plan, catalog)` → `ok, detail` —
-  compare target-capped wishlist stacks and distinct off-wishlist filler families.
+  compare quality-qualified target-capped wishlist stacks and distinct filler
+  families. A wished family with no qualified progress is still filler.
   Save a net wishlist gain, a filler reduction at equal wishlist progress, or a
   one-for-one wishlist rotation that adds no filler. Reject unchanged snapshots
   and net wishlist regressions. `incumbentEchoes` = slot echoes array.
@@ -124,7 +133,7 @@ Fork from EchoOptimizer/logic/Model.lua VERBATIM: `NormName`, `StripRaritySuffix
   `0.25 ×` off-wishlist families) and `Ratchet.BestSlot(slots, plan, catalog)` →
   `slot|nil` over genuinely-verified rows only (`verified and verifiedFieldPresent and
   not suspectParse`), sparse-safe (pairs).
-- `Ratchet.RunsEstimate(plan, owned, queue, support)` → `{ text = s, unknown = bool }` —
+- `Ratchet.RunsEstimate(plan, owned, queue, support, catalog)` → `{ text = s, unknown = bool }` —
   with θ unmeasured return `unknown=true` and text like "~N wishlist echoes pending
   (rate unmeasured)"; never fabricate a number labeled as fact.
 
@@ -197,7 +206,7 @@ anchorSpellId=nil, leverOptOut={}), `defaultFlags` (DISABLE_SUPPRESSES_GUARANTEE
 priorAutoAccept, flagDemotions, recordedPicks for the current session). Char key from
 `UnitName("player")` guarded — if unavailable, defer (never latch "Unknown").
 
-## core/GameAdapter.lua — `Nexus.GameAdapter` (sole IO; my file)
+## core/GameAdapter.lua — `Nexus.GameAdapter` (sole IO module)
 
 Exposes to Main: `Init(callbacks)`, `Catalog()`, `Board()`, `Charges()`, `Owned()`,
 `Wishlist()`, `Slots()`, `DisabledLevers()`, `DiscoverySynced()`, `Level()`, `Horizon()`,
@@ -260,7 +269,7 @@ run-boundary, self-check demotion hook).
 - Seeding saves only into an empty slot within `GetServerUnlockedSlots()`.
 - `Panel.Toggle()` exists. `/wr undemote` clears flag demotions.
 
-## tests (mine)
+## tests
 
 `tests/harness.lua` (stub extensions per design §10) + `tests/run_integration.lua`
 (scenario asserts). Run: `luajit tests/run_integration.lua` from the addon root; exits

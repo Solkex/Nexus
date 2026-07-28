@@ -94,11 +94,11 @@ local function Param(params, key)
     return DEFAULT_PARAMS[key]
 end
 
--- Marginal value of taking one copy of spellId given the plan and the
--- owned state. Coverage/duplicate/filler are decided at FAMILY
--- granularity (any quality variant of a wished family covers it);
--- exhaustion inputs stay per-spellId. Pure; returns a single number,
--- 0 on malformed input.
+-- Marginal value of taking one copy of spellId given the plan and the owned
+-- state. Guarantee subtraction remains family-granular, but wishlist value is
+-- quality-qualified: only a requested tier can advance a multi-quality target.
+-- Exhaustion inputs stay per-spellId. Pure; returns a single number, 0 on
+-- malformed input.
 function Model.Delta(plan, owned, spellId, catalog, params)
     plan = type(plan) == "table" and plan or {}
     owned = type(owned) == "table" and owned or {}
@@ -114,74 +114,65 @@ function Model.Delta(plan, owned, spellId, catalog, params)
     local bySpell = type(owned.bySpell) == "table" and owned.bySpell or {}
     local byFamily = type(owned.byFamily) == "table" and owned.byFamily or {}
     local ownedFam = tonumber(byFamily[family]) or 0
-    local ownedSpell = tonumber(bySpell[spellId]) or 0
+    local ownedSpell = tonumber(bySpell[spellId])
+        or tonumber(bySpell[tostring(spellId)]) or 0
     local maxStack = tonumber(row.maxStack) or 1
     if maxStack < 1 then maxStack = 1 end
+    local wishedFamilies = type(plan.wishedFamilies) == "table"
+        and plan.wishedFamilies or {}
+    local familyWanted = wishedFamilies[family] and true or false
+    local qualifiedOwned, targetTotal = 0, 1
+    local offeredNeeded = false
+    if familyWanted then
+        qualifiedOwned, targetTotal = Model.TargetProgress(
+            plan, catalog, family, owned)
+        offeredNeeded = Model.QualityOfferNeeded(
+            plan, catalog, family, tonumber(row.quality) or 0, owned)
+    end
 
     -- Duplicate: family full at maxStack, this exact spellId exhausted,
     -- or any owned maxStack==1 family member (one owned quality variant
     -- of a unique echo exhausts the whole family for value purposes,
     -- even though pool removal stays per-spellId).
-    local isDuplicate = (ownedFam >= maxStack and ownedFam > 0)
-        or ownedSpell >= maxStack
-    if not isDuplicate then
+    --
+    -- A still-needed quality variant is exempt from family-level duplicate
+    -- detection. This permits an exact-quality upgrade after a lower variant
+    -- entered the run, and permits each requested tier of a multi-tier stack.
+    -- The exact spell's own maxStack remains authoritative.
+    local isDuplicate = ownedSpell >= maxStack
+    if not isDuplicate and not (familyWanted and offeredNeeded) then
+        isDuplicate = (ownedFam >= maxStack and ownedFam > 0)
         local members = type(catalog.familyMembers) == "table"
             and catalog.familyMembers[family] or nil
-        for i = 1, #(members or {}) do
-            local m = (members or {})[i]
-            local mr = rows[m]
-            if type(mr) == "table" and (tonumber(mr.maxStack) or 1) == 1
-                and (tonumber(bySpell[m]) or 0) > 0 then
-                isDuplicate = true
-                break
+        if not isDuplicate then
+            for i = 1, #(members or {}) do
+                local m = (members or {})[i]
+                local mr = rows[m]
+                if type(mr) == "table" and (tonumber(mr.maxStack) or 1) == 1
+                    and (tonumber(bySpell[m])
+                        or tonumber(bySpell[tostring(m)]) or 0) > 0 then
+                    isDuplicate = true
+                    break
+                end
             end
         end
     end
     if isDuplicate then return Param(params, "duplicate") end
 
-    local wishedFamilies = type(plan.wishedFamilies) == "table"
-        and plan.wishedFamilies or {}
-    local targets = type(plan.targets) == "table" and plan.targets or {}
-
     local v
-    if wishedFamilies[family] then
-        if ownedFam <= 0 then
-            local quality = tonumber(row.quality) or 0
-            -- Quality gate (multi-quality families -- the stat echoes):
-            -- quality variants are DISTINCT spellIds in one family, and
-            -- taking a below-wished-quality copy covers the family at the
-            -- wrong quality for the run AND poisons the saved loadout
-            -- (next run's guarantee re-serves the low copy). Worse than
-            -- filler -- filler is merely useless, this actively damages
-            -- the end build. Applies REGARDLESS of maxStack: stat echoes
-            -- are stackable in the server catalog even when the wishlist
-            -- wants a single copy (live 2026-07-24: a gray guaranteed
-            -- Iron Constitution scored full coverage because the old gate
-            -- required maxStack == 1).
-            local wishedQuality = Model.EffectiveWishedQuality(plan, catalog, family, 0, bySpell)
-            if quality < wishedQuality
-                and Model.FamilyMultiQuality(catalog, family) then
-                return Param(params, "qualityMiss")
-            end
+    if familyWanted then
+        if not offeredNeeded then
+            return Model.FamilyMultiQuality(catalog, family)
+                and Param(params, "qualityMiss")
+                or Param(params, "duplicate")
+        end
+        local quality = tonumber(row.quality) or 0
+        if qualifiedOwned <= 0 then
             v = Param(params, "coverage")
                 + Param(params, "qualityBonus") * quality
         else
-            local target = targets[family]
-            local targetStacks = type(target) == "table"
-                and tonumber(target.targetStacks) or nil
-            targetStacks = targetStacks or 1
-            if ownedFam < targetStacks then
-                local wishedQuality = Model.EffectiveWishedQuality(plan, catalog, family, ownedFam, bySpell)
-                local quality = tonumber(row.quality) or 0
-                if quality < wishedQuality
-                    and Model.FamilyMultiQuality(catalog, family) then
-                    return Param(params, "qualityMiss")
-                end
-                v = Param(params, "coverage")
-                    * ((targetStacks - ownedFam) / targetStacks)
-            else
-                v = 0 -- covered at target; extra copies are neutral
-            end
+            v = Param(params, "coverage")
+                * ((targetTotal - qualifiedOwned) / targetTotal)
         end
     else
         v = Param(params, "filler")
@@ -197,7 +188,8 @@ function Model.Delta(plan, owned, spellId, catalog, params)
         end
         local anchorFam = type(catalog.familyOf) == "table"
             and catalog.familyOf[anchor] or nil
-        local anchorOwned = (tonumber(bySpell[anchor]) or 0) > 0
+        local anchorOwned = (tonumber(bySpell[anchor])
+            or tonumber(bySpell[tostring(anchor)]) or 0) > 0
             or (anchorFam ~= nil and (tonumber(byFamily[anchorFam]) or 0) > 0)
         if anchorOwned then
             v = v + Param(params, "diversity")
@@ -253,6 +245,31 @@ end
 -- "we want the blue of each stat if possible" means the target is what's
 -- POSSIBLE, not what a lossy wire happened to store. The stored
 -- wishedQuality still acts as a floor for single-variant data.
+local function CountFamilyAtQuality(catalog, family, ownedBySpell, quality)
+    if type(ownedBySpell) ~= "table" then return 0 end
+    local members = type(catalog) == "table"
+        and type(catalog.familyMembers) == "table"
+        and catalog.familyMembers[family] or nil
+    local rows = type(catalog) == "table" and catalog.rows or nil
+    local count = 0
+    for i = 1, #(members or {}) do
+        local id = members[i]
+        local row = type(rows) == "table" and rows[id] or nil
+        if type(row) == "table"
+            and (tonumber(row.quality) or 0) == tonumber(quality) then
+            count = count + (tonumber(ownedBySpell[id])
+                or tonumber(ownedBySpell[tostring(id)]) or 0)
+        end
+    end
+    return count
+end
+
+local function MultiTierTarget(target)
+    return type(target) == "table"
+        and type(target.qualityTiers) == "table"
+        and #target.qualityTiers > 1
+end
+
 function Model.EffectiveWishedQuality(plan, catalog, family, ownedFamCount, ownedBySpell)
     local stored = 0
     local targets = type(plan) == "table" and plan.targets or nil
@@ -260,13 +277,19 @@ function Model.EffectiveWishedQuality(plan, catalog, family, ownedFamCount, owne
     if type(t) == "table" then stored = tonumber(t.wishedQuality) or 0 end
 
     -- Multi-tier wishlist (e.g. Quick Hands Common×5, Uncommon×50, Rare×20):
-    -- the player explicitly wants copies at EVERY listed quality tier.
-    -- Return the lowest quality on the wishlist so the gate accepts anything
-    -- at or above that level — a Common Quick Hands is not a quality miss
-    -- when Common is explicitly on the wishlist.
-    if type(t) == "table" and type(t.qualityTiers) == "table"
-        and #t.qualityTiers > 1 then
-        return stored  -- stored = wishedQuality = lowest tier quality
+    -- the player explicitly wants copies at EVERY listed quality tier. Return
+    -- the first tier whose exact quota remains incomplete. Callers that need
+    -- to validate a particular offer use QualityOfferNeeded below.
+    if MultiTierTarget(t) then
+        for _, tier in ipairs(t.qualityTiers) do
+            local need = math.max(0, tonumber(tier.n) or 0)
+            if CountFamilyAtQuality(
+                catalog, family, ownedBySpell, tonumber(tier.q) or 0) < need then
+                return tonumber(tier.q) or stored
+            end
+        end
+        local last = t.qualityTiers[#t.qualityTiers]
+        return tonumber(last and last.q) or stored
     end
 
     -- Single-tier wishlist: escalate to catalog peak for multi-quality
@@ -279,12 +302,96 @@ function Model.EffectiveWishedQuality(plan, catalog, family, ownedFamCount, owne
     return stored
 end
 
+-- Quality-qualified progress for a wished family. Multi-tier targets count
+-- every exact tier independently; a surplus Common copy cannot satisfy a Rare
+-- quota. Single-tier multi-quality targets count only variants at or above the
+-- effective target quality. Ordinary families retain family-stack semantics.
+function Model.TargetProgress(plan, catalog, family, owned)
+    local targets = type(plan) == "table" and plan.targets or nil
+    local target = targets and targets[family]
+    local want = type(target) == "table"
+        and tonumber(target.targetStacks) or 1
+    if want < 1 then want = 1 end
+
+    local bySpell = type(owned) == "table"
+        and type(owned.bySpell) == "table" and owned.bySpell or {}
+    local byFamily = type(owned) == "table"
+        and type(owned.byFamily) == "table" and owned.byFamily or {}
+
+    if MultiTierTarget(target) then
+        local have, total = 0, 0
+        for _, tier in ipairs(target.qualityTiers) do
+            local need = math.max(0, tonumber(tier.n) or 0)
+            local count = CountFamilyAtQuality(
+                catalog, family, bySpell, tonumber(tier.q) or 0)
+            have = have + math.min(count, need)
+            total = total + need
+        end
+        if total > 0 then return have, total end
+    end
+
+    if Model.FamilyMultiQuality(catalog, family) then
+        local required = Model.EffectiveWishedQuality(
+            plan, catalog, family, nil, bySpell)
+        local members = type(catalog) == "table"
+            and type(catalog.familyMembers) == "table"
+            and catalog.familyMembers[family] or nil
+        local rows = type(catalog) == "table" and catalog.rows or nil
+        local have = 0
+        for i = 1, #(members or {}) do
+            local id = members[i]
+            local row = type(rows) == "table" and rows[id] or nil
+            if type(row) == "table"
+                and (tonumber(row.quality) or 0) >= required then
+                have = have + (tonumber(bySpell[id])
+                    or tonumber(bySpell[tostring(id)]) or 0)
+            end
+        end
+        return math.min(have, want), want
+    end
+
+    local have = tonumber(byFamily[family])
+        or tonumber(byFamily[tostring(family)]) or 0
+    return math.min(have, want), want
+end
+
+-- True only while this offered quality can still satisfy an unmet portion of
+-- the target. Multi-tier targets require an exact tier match and stop accepting
+-- that quality once its quota is full.
+function Model.QualityOfferNeeded(plan, catalog, family, quality, owned)
+    local progress, want = Model.TargetProgress(plan, catalog, family, owned)
+    if progress >= want then return false end
+
+    local targets = type(plan) == "table" and plan.targets or nil
+    local target = targets and targets[family]
+    local bySpell = type(owned) == "table"
+        and type(owned.bySpell) == "table" and owned.bySpell or {}
+    quality = tonumber(quality) or 0
+
+    if MultiTierTarget(target) then
+        for _, tier in ipairs(target.qualityTiers) do
+            if (tonumber(tier.q) or 0) == quality then
+                local need = math.max(0, tonumber(tier.n) or 0)
+                return CountFamilyAtQuality(
+                    catalog, family, bySpell, quality) < need
+            end
+        end
+        return false
+    end
+
+    if Model.FamilyMultiQuality(catalog, family) then
+        return quality >= Model.EffectiveWishedQuality(
+            plan, catalog, family, nil, bySpell)
+    end
+    return true
+end
+
 -- A wished STACKING family still short of its wishlist stack target
 -- (own 0..target-1 of a want-9 echo). The guarantee only ever serves the
 -- FIRST copy of a family; every further stack is free-slot RNG, so a
 -- free-slot appearance of one of these is always worth banking with a
 -- freeze when it isn't this board's pick. Pure; false on malformed input.
-function Model.StackWishBelowTarget(plan, owned, family)
+function Model.StackWishBelowTarget(plan, owned, family, catalog)
     if family == nil then return false end
     local wishedFamilies = type(plan) == "table" and plan.wishedFamilies or nil
     if not (wishedFamilies and wishedFamilies[family]) then return false end
@@ -292,6 +399,10 @@ function Model.StackWishBelowTarget(plan, owned, family)
     local target = targets and targets[family]
     local targetStacks = (type(target) == "table" and tonumber(target.targetStacks)) or 1
     if targetStacks <= 1 then return false end
+    if type(Model.TargetProgress) == "function" and catalog then
+        local have, want = Model.TargetProgress(plan, catalog, family, owned)
+        return have < want
+    end
     local byFamily = type(owned) == "table" and owned.byFamily or nil
     local ownedFam = tonumber(byFamily and byFamily[family]) or 0
     return ownedFam < targetStacks

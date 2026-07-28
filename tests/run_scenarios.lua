@@ -642,4 +642,53 @@ do
         "refused final search actions must take the frozen Echo")
 end
 
+-- Disabling automatic Banish must advance to another executable action rather
+-- than repeatedly proposing a Banish that Main intentionally will not send.
+do
+    local result = decide({
+        card(400), card(401),
+    }, nil, {
+        allowBanish=false,
+        charges={ freeze=0, banish=2, reroll=0, trustworthy=true },
+    })
+    expect(result.type == "take",
+        "disabled automatic Banish must fall through to a selectable action")
+end
+
+-- Final Phase B has no protected guarantee/frozen fallback, but its search
+-- actions still need endgame refusal recovery.
+do
+    local result = decide({
+        card(400), card(401),
+    }, nil, {
+        level=80,
+        horizon=1,
+        charges={ freeze=0, banish=2, reroll=1, trustworthy=true },
+    })
+    expect(result.type == "banish" and result.endgame,
+        "unprotected final Banish must be marked for refusal recovery")
+
+    result = decide({
+        card(400), card(401),
+    }, nil, {
+        level=80,
+        horizon=1,
+        searchRefused={ banish=true },
+        charges={ freeze=0, banish=2, reroll=1, trustworthy=true },
+    })
+    expect(result.type == "reroll" and result.endgame,
+        "refused final Banish must advance to an endgame Reroll")
+
+    result = decide({
+        card(400), card(401),
+    }, nil, {
+        level=80,
+        horizon=1,
+        searchRefused={ banish=true, reroll=true },
+        charges={ freeze=0, banish=2, reroll=1, trustworthy=true },
+    })
+    expect(result.type == "take" and result.endgame,
+        "exhausted unprotected final search must make a mandatory selection")
+end
+
 print("guaranteed-queue policy scenarios OK (checks=" .. checks .. ")")

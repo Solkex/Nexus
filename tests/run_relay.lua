@@ -24,10 +24,13 @@ local catalog = {
         [2] = { spellId=2, name="Two", maxStack=1, quality=1 },
         [3] = { spellId=3, name="Three", maxStack=1, quality=1 },
         [9] = { spellId=9, name="Filler", maxStack=1, quality=1 },
+        [10] = { spellId=10, name="One Variant", maxStack=1, quality=1 },
     },
-    familyOf = { [1]="s1", [2]="s2", [3]="s3", [9]="s9" },
+    familyOf = {
+        [1]="s1", [2]="s2", [3]="s3", [9]="s9", [10]="s1",
+    },
     familyMembers = {
-        s1={1}, s2={2}, s3={3}, s9={9},
+        s1={1,10}, s2={2}, s3={3}, s9={9},
     },
     familyName = {
         s1="One", s2="Two", s3="Three", s9="Filler",
@@ -157,7 +160,10 @@ local armSlots = {
 }
 local pending = {
     sourceSlot=1, targetSlot=2, wishlistKey="wish-A", wishlistSlot=7,
-    snapshot={ s1=1, s2=1 },
+    snapshot={
+        byFamily={ s1=1, s2=1 },
+        bySpell={ [1]=1, [2]=1 },
+    },
 }
 
 do
@@ -218,6 +224,33 @@ do
         associations={ [1]="wish-A", [2]="wish-A" },
     })
     Eq(action, "cancel", "changed relay Snapshot contents block automatic activation")
+end
+
+do
+    local changedVariantSlots = {
+        activeSlot=1, maxSlots=3,
+        bySlot={ [1]=Row(1), [2]=Row(10, 2) },
+    }
+    local action = Relay.ArmDecision({
+        pending=pending, slots=changedVariantSlots,
+        associations={ [1]="wish-A", [2]="wish-A" },
+    })
+    Eq(action, "cancel",
+        "same-family replacement cannot bypass exact relay verification")
+end
+
+do
+    local invalidCountSlots = {
+        activeSlot=1, maxSlots=3,
+        bySlot={ [1]=Row(1), [2]=Row(1, 2) },
+    }
+    invalidCountSlots.bySlot[2].echoes[1].stacks = 0
+    local action = Relay.ArmDecision({
+        pending=pending, slots=invalidCountSlots,
+        associations={ [1]="wish-A", [2]="wish-A" },
+    })
+    Eq(action, "cancel",
+        "non-positive stack data cannot satisfy exact relay verification")
 end
 
 io.write(string.format("relay tests passed: %d\n", passed))

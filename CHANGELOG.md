@@ -2,7 +2,7 @@
 
 All notable public changes to Nexus are documented here.
 
-## 1.17
+## 1.18
 
 ### Guarantee convergence
 
@@ -15,13 +15,16 @@ All notable public changes to Nexus are documented here.
 ### Scoring and safety
 
 - Counts explicit multi-quality wishlist tiers correctly instead of rejecting a lower tier the player requested.
+- Stops accepting a lower quality after its exact tier quota is filled and keeps higher requested tiers pending.
 - Scores requested stack progress when choosing between saved Snapshots.
+- Qualifies save progress by exact quality and verifies exact spell variants before arming a relay Snapshot.
+- Falls through safely when automatic Banish is disabled or a final-search action is refused.
 - Never overwrites the active Snapshot, an unrelated Snapshot, an unverified Snapshot, or a stronger same-wishlist Snapshot.
 - Keeps protocol-7 DPS identity validation, owner verification, mesh backfill, and peer-presence hardening from the latest public code.
 
 ### Interface and diagnostics
 
-- Adds the release HUD, Snapshot association controls, server-status view, bounded support diagnostic export, and one-time 1.17 release notes.
+- Adds the release HUD, Snapshot association controls, server-status view, bounded support diagnostic export, and one-time 1.18 release notes.
 - Defers heavy UI initialization until the player enters the world.
 
 ## 1.1

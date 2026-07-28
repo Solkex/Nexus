@@ -2,8 +2,7 @@
 
 Echo build automation, community builds, DPS leaderboards, and mesh-style synchronization for Project Ebonhold.
 
-## Download Nexus 1.1
-
+## Download Nexus
 ### [Download Nexus.zip](https://github.com/Solkex/Nexus/releases)
 
 This is the correct download for normal players.
